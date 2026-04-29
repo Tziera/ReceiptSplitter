@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
+  <rect width="192" height="192" rx="32" fill="#4f46e5"/>
+  <!-- Receipt body -->
+  <rect x="48" y="28" width="96" height="116" rx="6" fill="white"/>
+  <!-- Receipt lines -->
+  <rect x="62" y="48" width="68" height="9" rx="4" fill="#e0e7ff"/>
+  <rect x="62" y="67" width="52" height="7" rx="3" fill="#c7d2fe"/>
+  <rect x="62" y="84" width="60" height="7" rx="3" fill="#c7d2fe"/>
+  <rect x="62" y="101" width="44" height="7" rx="3" fill="#c7d2fe"/>
+  <!-- Price bar -->
+  <rect x="62" y="118" width="68" height="12" rx="5" fill="#4f46e5"/>
+  <!-- Three person dots -->
+  <circle cx="72" cy="163" r="11" fill="white" opacity="0.95"/>
+  <circle cx="96" cy="163" r="11" fill="white" opacity="0.95"/>
+  <circle cx="120" cy="163" r="11" fill="white" opacity="0.95"/>
+</svg>
