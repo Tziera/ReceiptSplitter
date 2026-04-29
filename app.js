@@ -579,7 +579,7 @@ function renderApiKeyScreen() {
 
       <div class="api-key-section">
         <div class="api-key-label">Claude Haiku <span class="api-key-tag">Reserv · ~0,02 kr/kvitto</span></div>
-        <div class="api-key-info">console.anthropic.com → API Keys — $5 gratis kredit vid registrering</div>
+        <div class="api-key-info">console.anthropic.com → API Keys</div>
         <input class="api-key-input" type="text" id="claude-key-input"
           placeholder="sk-ant-…" autocomplete="off" spellcheck="false"
           value="${esc(state.claudeApiKey)}">
