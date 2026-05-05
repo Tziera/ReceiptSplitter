@@ -327,6 +327,45 @@ body {
 }
 .total-line strong { color: var(--text); }
 
+/* ─── Receipt check banner (step 2) ─── */
+.receipt-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  font-size: 14px;
+  line-height: 1.4;
+}
+.receipt-check--ok {
+  background: #ecfdf5;
+  border: 1px solid #6ee7b7;
+  color: #065f46;
+}
+.receipt-check--warn {
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  color: #78350f;
+}
+.receipt-check--neutral {
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  color: #0c4a6e;
+}
+.rchk-icon { font-size: 18px; flex-shrink: 0; line-height: 1.3; }
+.rchk-body { flex: 1; }
+.rchk-title { font-weight: 700; margin-bottom: 4px; }
+.rchk-sub { font-size: 13px; opacity: 0.85; margin-top: 2px; }
+.rchk-hint { font-size: 12px; opacity: 0.8; margin-top: 6px; font-style: italic; }
+.rchk-table { width: 100%; border-collapse: collapse; margin-top: 2px; }
+.rchk-table td { padding: 2px 0; font-size: 13px; }
+.rchk-table td:last-child { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+.rchk-sep-row td { padding-top: 5px; border-top: 1px solid currentColor; opacity: 0.25; }
+.rchk-diff-row td { font-weight: 700; padding-top: 4px; }
+.receipt-check--warn .rchk-diff-row { border-top: 1px solid #fcd34d; }
+.rchk-ok-row td { font-weight: 700; color: #059669; padding-top: 4px; }
+
 /* ─── Step 3: People ─── */
 .people-list {
   display: flex;
