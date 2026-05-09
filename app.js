@@ -1,5 +1,7 @@
 'use strict';
 
+const APP_VERSION = '1.0.2';
+
 // ─── State ───────────────────────────────────────────────────────────────────
 
 const state = {
@@ -416,7 +418,10 @@ function renderHeader() {
   return `
     <header class="app-header">
       <h1>🧾 Kvittodelare</h1>
-      <button class="btn-icon" id="settings-btn" title="API-nyckel">⚙️</button>
+      <div class="header-right">
+        <span class="app-version">v${APP_VERSION}</span>
+        <button class="btn-icon" id="settings-btn" title="API-nyckel">⚙️</button>
+      </div>
     </header>`;
 }
 

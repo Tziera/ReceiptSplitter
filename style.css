@@ -49,6 +49,8 @@ body {
 }
 
 .app-header h1 { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
+.header-right { display: flex; align-items: center; gap: 8px; }
+.app-version { font-size: 11px; opacity: 0.65; letter-spacing: 0.3px; }
 
 .btn-icon {
   background: rgba(255,255,255,0.15);
