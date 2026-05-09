@@ -9,7 +9,7 @@ const state = {
   showApiKeyScreen: false,
   images: [],         // [{id, file, dataUrl}]
   items: [],          // [{id, name, price}]
-  receiptTotals: [],  // [number|null] – one per receipt, null if total not visible
+  receipts: [],      // [{name, total}] – one per receipt, total=null if not visible
   people: [],         // [{id, name}]
   assignments: {},    // {itemId: Set<personId>}
   loading: false,
@@ -38,6 +38,7 @@ Regler:
 - Inkludera BARA enskilda varor och rabattrader i items – exkludera totalsummor, delsummor och momsrader
 - Rabatter som visas som separata rader (t.ex. "Rabatt -10 kr") ska inkluderas med negativt price
 - receipt_totals: lista slutbeloppet att betala (efter rabatter) per kvitto du ser i bilderna. Använd null om totalsumman ej är synlig. Om flera bilder visar SAMMA kvitto, ge ett enda värde.
+- Lägg till receipt_idx (0-baserat heltal) på varje item för att ange vilket kvitto i receipt_totals det tillhör
 - Om ett pris är oklart, uppskatta rimligt`;
 
   const parts = [{ text: prompt }];
@@ -103,6 +104,7 @@ Returnera ENBART giltig JSON utan kodblock:
 - Inkludera BARA enskilda varor och rabattrader i items – exkludera totalsummor, delsummor och momsrader
 - Rabatter som visas som separata rader inkluderas med negativt price
 - receipt_totals: slutbeloppet per kvitto (efter rabatter), null om ej synlig. Samma kvitto i flera bilder = ett värde.
+- Lägg till receipt_idx (0-baserat heltal) på varje item för att ange vilket kvitto i receipt_totals det tillhör
 - Om pris är oklart, uppskatta`,
   });
 
@@ -169,11 +171,16 @@ function toItemsAndTotals(raw) {
     id: uid(),
     name: String(it.name || 'Okänd vara').trim(),
     price: parsePrice(it.price),
+    receiptIdx: typeof it.receipt_idx === 'number' ? it.receipt_idx : 0,
   }));
-  const receiptTotals = Array.isArray(raw.receipt_totals)
-    ? raw.receipt_totals.map(t => (t === null || t === undefined) ? null : parsePrice(t))
-    : [];
-  return { items, receiptTotals };
+  const receipts = Array.isArray(raw.receipt_totals)
+    ? raw.receipt_totals.map((t, i) => ({
+        name: `Kvitto ${i + 1}`,
+        total: (t === null || t === undefined) ? null : parsePrice(t),
+      }))
+    : [{ name: 'Kvitto 1', total: null }];
+  if (!receipts.length) receipts.push({ name: 'Kvitto 1', total: null });
+  return { items, receipts };
 }
 
 async function handleAnalyze() {
@@ -187,8 +194,8 @@ async function handleAnalyze() {
 
     for (let attempt = 0; attempt <= DELAYS.length; attempt++) {
       try {
-        const { items, receiptTotals } = toItemsAndTotals(await callGemini(state.images, state.apiKey));
-        setState({ loading: false, loadingMessage: '', items, receiptTotals, step: 2 });
+        const { items, receipts } = toItemsAndTotals(await callGemini(state.images, state.apiKey));
+        setState({ loading: false, loadingMessage: '', items, receipts, step: 2 });
         return;
       } catch (e) {
         const isHighDemand = e.message.toLowerCase().includes('high demand');
@@ -212,8 +219,8 @@ async function handleAnalyze() {
 
   // ── Claude-fallback ──
   try {
-    const { items, receiptTotals } = toItemsAndTotals(await callClaude(state.images, state.claudeApiKey));
-    setState({ loading: false, loadingMessage: '', items, receiptTotals, step: 2 });
+    const { items, receipts } = toItemsAndTotals(await callClaude(state.images, state.claudeApiKey));
+    setState({ loading: false, loadingMessage: '', items, receipts, step: 2 });
   } catch (e) {
     setState({ loading: false, loadingMessage: '', error: `Claude: ${e.message}` });
   }
@@ -231,9 +238,24 @@ function collectItems() {
   });
 }
 
+function collectReceipts() {
+  document.querySelectorAll('[data-rcpt-name]').forEach(input => {
+    const idx = +input.dataset.rcptName;
+    if (state.receipts[idx]) state.receipts[idx].name = input.value || `Kvitto ${idx + 1}`;
+  });
+  document.querySelectorAll('[data-rcpt-total]').forEach(input => {
+    const idx = +input.dataset.rcptTotal;
+    if (state.receipts[idx]) {
+      const v = parseFloat(input.value);
+      state.receipts[idx].total = isNaN(v) ? null : v;
+    }
+  });
+}
+
 function addItem() {
   collectItems();
-  setState({ items: [...state.items, { id: uid(), name: '', price: 0 }] });
+  collectReceipts();
+  setState({ items: [...state.items, { id: uid(), name: '', price: 0, receiptIdx: 0 }] });
   // Focus the new name input after render
   setTimeout(() => {
     const inputs = document.querySelectorAll('[data-name-id]');
@@ -243,6 +265,7 @@ function addItem() {
 
 function removeItem(id) {
   collectItems();
+  collectReceipts();
   const assignments = { ...state.assignments };
   delete assignments[id];
   setState({ items: state.items.filter(it => it.id !== id), assignments });
@@ -333,7 +356,7 @@ function saveApiKeys(geminiKey, claudeKey) {
 
 function reset() {
   Object.assign(state, {
-    step: 1, images: [], items: [], receiptTotals: [], people: [], assignments: {}, loading: false, error: null,
+    step: 1, images: [], items: [], receipts: [], people: [], assignments: {}, loading: false, error: null,
   });
   render();
 }
@@ -343,8 +366,11 @@ function reset() {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function parsePrice(val) {
-  if (typeof val === 'number') return isNaN(val) ? 0 : Math.max(0, val);
-  return Math.max(0, parseFloat(String(val).replace(',', '.').replace(/[^0-9.]/g, '')) || 0);
+  if (typeof val === 'number') return isNaN(val) ? 0 : val;
+  const s = String(val).replace(',', '.');
+  const neg = s.trimStart().startsWith('-');
+  const abs = parseFloat(s.replace(/[^0-9.]/g, '')) || 0;
+  return neg ? -abs : abs;
 }
 
 function fmt(num) {
@@ -465,105 +491,149 @@ function renderStep1() {
     ${state.images.length ? `<p class="hint">${state.images.length} bild${state.images.length > 1 ? 'er' : ''} vald${state.images.length > 1 ? 'a' : ''} — klicka för att lägga till fler</p>` : ''}`;
 }
 
+function renderItemRow(item, isWarned) {
+  return `
+    <div class="item-row${isWarned ? ' item-row--warn' : ''}">
+      <input class="item-name-input" type="text" value="${esc(item.name)}"
+        data-name-id="${item.id}" placeholder="Varunamn" inputmode="text">
+      <input class="item-price-input" type="number" value="${item.price || ''}"
+        data-price-id="${item.id}" placeholder="0" step="0.01" inputmode="decimal">
+      <button class="btn btn-danger" data-remove-item="${item.id}" aria-label="Ta bort">🗑</button>
+    </div>`;
+}
+
+function renderReceiptGroupHeader(receipt, idx, itemSum, isMismatch) {
+  const hasTotal = receipt.total !== null;
+  const statusClass = !hasTotal ? 'rgh--unknown' : isMismatch ? 'rgh--warn' : 'rgh--ok';
+  const icon = !hasTotal ? '❓' : isMismatch ? '⚠️' : '✓';
+
+  let totalInfo;
+  if (hasTotal) {
+    const diff = itemSum - receipt.total;
+    totalInfo = isMismatch
+      ? `${fmt(receipt.total)} kr förväntat · ${fmt(itemSum)} kr funna · <strong>Diff: ${diff > 0 ? '+' : ''}${fmt(diff)} kr</strong>`
+      : `${fmt(receipt.total)} kr · stämmer`;
+  } else {
+    totalInfo = `Varor: ${fmt(itemSum)} kr · Ange total:
+      <input class="rgh-total-input" type="number" data-rcpt-total="${idx}"
+        value="${receipt.total !== null ? receipt.total : ''}" placeholder="?" step="0.01" inputmode="decimal"> kr`;
+  }
+
+  return `<div class="receipt-group-header ${statusClass}">
+    <span class="rgh-icon">${icon}</span>
+    <div class="rgh-content">
+      <input class="rgh-name-input" type="text" value="${esc(receipt.name)}" data-rcpt-name="${idx}" placeholder="Kvitto ${idx + 1}">
+      <div class="rgh-info">${totalInfo}</div>
+    </div>
+  </div>`;
+}
+
 function renderReceiptCheck() {
-  if (!state.receiptTotals.length) return '';
+  if (!state.receipts.length) return '';
+  const receipt = state.receipts[0];
   const itemSum = state.items.reduce((s, it) => s + it.price, 0);
   const TOLERANCE = 0.50;
 
-  if (state.receiptTotals.length === 1) {
-    const total = state.receiptTotals[0];
-    if (total === null) {
-      return `<div class="receipt-check receipt-check--neutral">
-        <span class="rchk-icon">ℹ️</span>
-        <span>Ingen totalsumma hittades på kvittot – kan ej verifiera.</span>
-      </div>`;
-    }
-    const diff = itemSum - total;
-    if (Math.abs(diff) <= TOLERANCE) {
-      return `<div class="receipt-check receipt-check--ok">
-        <span class="rchk-icon">✓</span>
-        <div><div class="rchk-title">Stämmer med kvittots totalsumma</div>
-        <div class="rchk-sub">Kvitto: ${fmt(total)} kr · Hittade varor: ${fmt(itemSum)} kr</div></div>
-      </div>`;
-    }
-    const isUnder = diff < 0;
-    return `<div class="receipt-check receipt-check--warn">
-      <span class="rchk-icon">⚠️</span>
+  if (receipt.total === null) {
+    return `<div class="receipt-check receipt-check--neutral">
+      <span class="rchk-icon">ℹ️</span>
       <div class="rchk-body">
-        <div class="rchk-title">${isUnder ? 'Möjliga varor saknas' : 'Varorna summerar mer än kvittot'}</div>
-        <table class="rchk-table">
-          <tr><td>Kvittots totalsumma</td><td>${fmt(total)} kr</td></tr>
-          <tr><td>Hittade varor</td><td>${fmt(itemSum)} kr</td></tr>
-          <tr class="rchk-diff-row"><td>Differens</td><td>${diff > 0 ? '+' : ''}${fmt(diff)} kr</td></tr>
-        </table>
-        <div class="rchk-hint">${isUnder
-          ? 'Det kan saknas varor, eller en rabatt är ej inkluderad som en egen rad.'
-          : 'Kontrollera att rabatter är inkluderade som egna rader med negativt pris.'
-        }</div>
+        <div class="rchk-title">Ingen totalsumma hittades på kvittot</div>
+        <div class="rchk-verify-row">
+          <span>Verifiera mot:</span>
+          <input class="rchk-total-input" type="number" data-rcpt-total="0"
+            value="" placeholder="0,00" step="0.01" inputmode="decimal">
+          <span>kr</span>
+        </div>
       </div>
     </div>`;
   }
 
-  // Multiple receipts
-  const validTotals = state.receiptTotals.filter(t => t !== null);
-  const totalSum = validTotals.reduce((s, t) => s + t, 0);
-  const hasAllTotals = state.receiptTotals.every(t => t !== null);
-  const receiptRows = state.receiptTotals.map((t, i) =>
-    `<tr><td>Kvitto ${i + 1}</td><td>${t !== null ? fmt(t) + ' kr' : '<em>ej synlig</em>'}</td></tr>`
-  ).join('');
-
-  let statusClass = 'receipt-check--neutral';
-  let diffRow = '';
-  let hint = '';
-  let summaryRows = '';
-
-  if (validTotals.length > 0) {
-    const diff = itemSum - totalSum;
-    const ok = hasAllTotals && Math.abs(diff) <= TOLERANCE;
-    statusClass = ok ? 'receipt-check--ok' : 'receipt-check--warn';
-    diffRow = ok
-      ? `<tr class="rchk-ok-row"><td colspan="2">✓ Stämmer</td></tr>`
-      : `<tr class="rchk-diff-row"><td>Differens</td><td>${diff > 0 ? '+' : ''}${fmt(diff)} kr</td></tr>`;
-    summaryRows = `<tr class="rchk-sep-row"><td colspan="2"></td></tr>
-      <tr><td>Kvitton totalt${!hasAllTotals ? '*' : ''}</td><td>${fmt(totalSum)} kr</td></tr>
-      <tr><td>Hittade varor</td><td>${fmt(itemSum)} kr</td></tr>
-      ${diffRow}`;
-    if (!ok) {
-      hint = `<div class="rchk-hint">${diff < 0
-        ? 'Det kan saknas varor eller rabatter.' + (!hasAllTotals ? ' (Jämförelsen baseras bara på synliga totalsummor.)' : '')
-        : 'Varorna summerar mer – kontrollera att rabatter är inkluderade.'
-      }</div>`;
-    }
+  const diff = itemSum - receipt.total;
+  if (Math.abs(diff) <= TOLERANCE) {
+    return `<div class="receipt-check receipt-check--ok">
+      <span class="rchk-icon">✓</span>
+      <div><div class="rchk-title">Stämmer med kvittots totalsumma</div>
+      <div class="rchk-sub">Kvitto: ${fmt(receipt.total)} kr · Hittade varor: ${fmt(itemSum)} kr</div></div>
+    </div>`;
   }
 
-  return `<div class="receipt-check ${statusClass}">
+  const isUnder = diff < 0;
+  return `<div class="receipt-check receipt-check--warn">
+    <span class="rchk-icon">⚠️</span>
     <div class="rchk-body">
-      <div class="rchk-title">Kontroll mot kvitton</div>
-      <table class="rchk-table">${receiptRows}${summaryRows}</table>
-      ${hint}
+      <div class="rchk-title">${isUnder ? 'Möjliga varor saknas' : 'Varorna summerar mer än kvittot'}</div>
+      <table class="rchk-table">
+        <tr><td>Kvittots totalsumma</td><td>${fmt(receipt.total)} kr</td></tr>
+        <tr><td>Hittade varor</td><td>${fmt(itemSum)} kr</td></tr>
+        <tr class="rchk-diff-row"><td>Differens</td><td>${diff > 0 ? '+' : ''}${fmt(diff)} kr</td></tr>
+      </table>
+      <div class="rchk-hint">${isUnder
+        ? 'Det kan saknas varor, eller en rabatt är ej inkluderad som en egen rad.'
+        : 'Kontrollera att rabatter är inkluderade som egna rader med negativt pris.'
+      }</div>
     </div>
   </div>`;
 }
 
 function renderStep2() {
-  const rows = state.items.map(item => `
-    <div class="item-row">
-      <input class="item-name-input" type="text" value="${esc(item.name)}"
-        data-name-id="${item.id}" placeholder="Varunamn" inputmode="text">
-      <input class="item-price-input" type="number" value="${item.price || ''}"
-        data-price-id="${item.id}" placeholder="0" min="0" step="0.01" inputmode="decimal">
-      <button class="btn btn-danger" data-remove-item="${item.id}" aria-label="Ta bort">🗑</button>
-    </div>`).join('');
+  const numReceipts = state.receipts.length;
+  const TOLERANCE = 0.50;
+
+  // Per-receipt item sums
+  const receiptItemSums = Array(Math.max(numReceipts, 1)).fill(0);
+  for (const item of state.items) {
+    const ri = Math.min(item.receiptIdx ?? 0, receiptItemSums.length - 1);
+    receiptItemSums[ri] += item.price;
+  }
+
+  // Which receipts mismatch?
+  const mismatchedReceipts = new Set();
+  state.receipts.forEach((r, i) => {
+    if (r.total !== null && Math.abs((receiptItemSums[i] || 0) - r.total) > TOLERANCE) {
+      mismatchedReceipts.add(i);
+    }
+  });
+
+  let itemsHtml;
+  if (numReceipts <= 1) {
+    const warned = mismatchedReceipts.has(0);
+    const rows = state.items.map(it => renderItemRow(it, warned)).join('');
+    itemsHtml = `<div class="card">
+      ${rows || '<p class="text-sec" style="padding:12px 14px">Inga varor – lägg till manuellt nedan</p>'}
+    </div>`;
+  } else {
+    itemsHtml = state.receipts.map((r, ri) => {
+      const receiptItems = state.items.filter(it => (it.receiptIdx ?? 0) === ri);
+      const sum = receiptItemSums[ri] || 0;
+      const isMismatch = mismatchedReceipts.has(ri);
+      const rows = receiptItems.map(it => renderItemRow(it, isMismatch)).join('');
+      return `<div class="receipt-group">
+        ${renderReceiptGroupHeader(r, ri, sum, isMismatch)}
+        <div class="card">
+          ${rows || '<p class="text-sec" style="padding:12px 14px">Inga varor för detta kvitto</p>'}
+        </div>
+      </div>`;
+    }).join('');
+
+    // Items with receipt index outside known receipts
+    const orphans = state.items.filter(it => (it.receiptIdx ?? 0) >= numReceipts);
+    if (orphans.length) {
+      const rows = orphans.map(it => renderItemRow(it, false)).join('');
+      itemsHtml += `<div class="receipt-group">
+        <div class="receipt-group-header rgh--unknown"><span class="rgh-icon">❓</span><span>Okänt kvitto</span></div>
+        <div class="card">${rows}</div>
+      </div>`;
+    }
+  }
 
   const total = state.items.reduce((s, it) => s + it.price, 0);
 
   return `
     <h2 class="section-title">Granska varor</h2>
-    <div class="card">
-      ${rows || '<p class="text-sec" style="padding:12px 14px">Inga varor – lägg till manuellt nedan</p>'}
-    </div>
+    ${itemsHtml}
     ${state.items.length ? `<p class="total-line" id="total-display">Totalt: <strong>${fmt(total)} kr</strong></p>` : ''}
-    ${renderReceiptCheck()}
+    ${numReceipts <= 1 ? renderReceiptCheck() : ''}
     <button class="btn btn-add" id="add-item-btn">+ Lägg till vara</button>`;
 }
 
@@ -695,13 +765,13 @@ function bindStepEvents() {
   el('settings-btn')?.addEventListener('click', () => setState({ showApiKeyScreen: true }));
 
   el('back-btn')?.addEventListener('click', () => {
-    if (state.step === 2) collectItems();
+    if (state.step === 2) { collectItems(); collectReceipts(); }
     setState({ step: state.step - 1, error: null });
   });
 
   el('next-btn')?.addEventListener('click', () => {
     if (state.step === 3) { initAssignments(); return; }
-    if (state.step === 2) collectItems();
+    if (state.step === 2) { collectItems(); collectReceipts(); }
     setState({ step: state.step + 1, error: null });
   });
 
@@ -720,6 +790,11 @@ function bindStepEvents() {
     btn.addEventListener('pointerdown', e => { e.preventDefault(); removeItem(btn.dataset.removeItem); })
   );
   el('add-item-btn')?.addEventListener('pointerdown', e => { e.preventDefault(); addItem(); });
+
+  // Step 2 — receipt name/total inputs update validation on blur
+  document.querySelectorAll('[data-rcpt-total], [data-rcpt-name]').forEach(input =>
+    input.addEventListener('blur', () => { collectItems(); collectReceipts(); setState({}); })
+  );
 
   // Step 3
   const doAddPerson = () => {

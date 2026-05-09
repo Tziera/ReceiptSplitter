@@ -630,3 +630,75 @@ body {
   background: var(--surface);
 }
 .api-key-input:focus { outline: 2px solid var(--primary); border-color: transparent; }
+
+/* ─── Item row warning state ─── */
+.item-row--warn { border-left: 3px solid #fbbf24; padding-left: 11px; }
+
+/* ─── Receipt group (multi-receipt grouping) ─── */
+.receipt-group { margin-bottom: 16px; }
+
+.receipt-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.receipt-group-header.rgh--ok   { background: #d1fae5; color: #065f46; }
+.receipt-group-header.rgh--warn { background: #fef3c7; color: #92400e; }
+.receipt-group-header.rgh--unknown { background: #e0f2fe; color: #0c4a6e; }
+
+.receipt-group .card { border-radius: 0 0 var(--radius) var(--radius); margin-bottom: 0; }
+
+.rgh-icon { font-size: 14px; flex-shrink: 0; }
+
+.rgh-content { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+
+.rgh-name-input {
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 700;
+  color: inherit;
+  padding: 0;
+  width: 100%;
+}
+.rgh-name-input:focus { outline: 1px solid currentColor; border-radius: 2px; padding: 0 2px; }
+
+.rgh-info { font-size: 12px; opacity: 0.85; }
+
+.rgh-total-input {
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.5);
+  font-size: 12px;
+  color: inherit;
+  padding: 2px 5px;
+  width: 68px;
+  text-align: right;
+}
+.rgh-total-input:focus { outline: none; background: rgba(255,255,255,0.85); }
+
+/* ─── Receipt check: editable total input ─── */
+.rchk-verify-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+
+.rchk-total-input {
+  border: 1px solid #7dd3fc;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.7);
+  font-size: 14px;
+  color: #0c4a6e;
+  padding: 6px 8px;
+  width: 90px;
+  text-align: right;
+}
+.rchk-total-input:focus { outline: 2px solid var(--primary); border-color: transparent; }
