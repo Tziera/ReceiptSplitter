@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.0.2';
+const APP_VERSION = '1.0.3';
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -34,9 +34,10 @@ function setState(patch) {
 async function callGemini(images, apiKey) {
   const prompt = `Analysera kvittot/kvittona i bilden/bilderna. Extrahera alla enskilda varor, priser och rabatter.
 Returnera ENBART giltig JSON utan kodblock, utan förklaringar, precis i detta format:
-{"items":[{"name":"Varunamn","price":12.50}],"receipt_totals":[125.00]}
+{"items":[{"name":"Varunamn","price":12.50,"confidence":"high"}],"receipt_totals":[125.00]}
 Regler:
 - price ska vara ett tal (inte en sträng), med decimalpunkt
+- confidence ska vara "high", "medium" eller "low" beroende på hur tydlig texten/siffran är i bilden
 - Inkludera BARA enskilda varor och rabattrader i items – exkludera totalsummor, delsummor och momsrader
 - Rabatter som visas som separata rader (t.ex. "Rabatt -10 kr") ska inkluderas med negativt price
 - receipt_totals: lista slutbeloppet att betala (efter rabatter) per kvitto du ser i bilderna. Använd null om totalsumman ej är synlig. Om flera bilder visar SAMMA kvitto, ge ett enda värde.
@@ -101,8 +102,9 @@ async function callClaude(images, apiKey) {
     type: 'text',
     text: `Analysera kvittot/kvittona i bilderna. Extrahera alla enskilda varor, priser och rabatter.
 Returnera ENBART giltig JSON utan kodblock:
-{"items":[{"name":"Varunamn","price":12.50}],"receipt_totals":[125.00]}
+{"items":[{"name":"Varunamn","price":12.50,"confidence":"high"}],"receipt_totals":[125.00]}
 - price ska vara ett tal med decimalpunkt
+- confidence ska vara "high", "medium" eller "low" beroende på hur tydlig texten/siffran är i bilden
 - Inkludera BARA enskilda varor och rabattrader i items – exkludera totalsummor, delsummor och momsrader
 - Rabatter som visas som separata rader inkluderas med negativt price
 - receipt_totals: slutbeloppet per kvitto (efter rabatter), null om ej synlig. Samma kvitto i flera bilder = ett värde.
@@ -168,11 +170,72 @@ function removeImage(id) {
   setState({ images: state.images.filter(img => img.id !== id) });
 }
 
+function normalizeName(name) {
+  return String(name).toLowerCase().trim().replace(/\s+/g, ' ');
+}
+
+const CONF_RANK = { high: 2, medium: 1, low: 0 };
+function worstConf(...confs) {
+  const rank = Math.min(...confs.map(c => CONF_RANK[c] ?? 2));
+  return ['low', 'medium', 'high'][rank];
+}
+
+function diffResults(rawA, rawB) {
+  const itemsA = rawA.items || [];
+  const itemsB = rawB.items || [];
+  const usedB = new Set();
+  const result = [];
+
+  for (const a of itemsA) {
+    const normA = normalizeName(a.name);
+    let bestJ = -1, bestScore = 0;
+    itemsB.forEach((b, j) => {
+      if (usedB.has(j)) return;
+      const normB = normalizeName(b.name);
+      const score = normA === normB ? 2 : (normA.includes(normB) || normB.includes(normA)) ? 1 : 0;
+      if (score > bestScore) { bestScore = score; bestJ = j; }
+    });
+
+    if (bestJ >= 0) {
+      const b = itemsB[bestJ];
+      usedB.add(bestJ);
+      const pa = parsePrice(a.price), pb = parsePrice(b.price);
+      const diff = Math.abs(pa - pb);
+      const diffConf = diff <= 0.50 ? 'high' : diff <= 5.00 ? 'medium' : 'low';
+      result.push({
+        name: a.name,
+        price: diff <= 0.50 ? pa : (pa + pb) / 2,
+        confidence: worstConf(diffConf, a.confidence || 'high', b.confidence || 'high'),
+        receipt_idx: a.receipt_idx ?? 0,
+      });
+    } else {
+      result.push({ name: a.name, price: parsePrice(a.price), confidence: 'low', receipt_idx: a.receipt_idx ?? 0 });
+    }
+  }
+
+  itemsB.forEach((b, j) => {
+    if (!usedB.has(j)) {
+      result.push({ name: b.name, price: parsePrice(b.price), confidence: 'low', receipt_idx: b.receipt_idx ?? 0 });
+    }
+  });
+
+  return { items: result, receipt_totals: rawA.receipt_totals ?? rawB.receipt_totals };
+}
+
+async function analyzeWithDual(callFn, images, apiKey) {
+  const [a, b] = await Promise.allSettled([callFn(images, apiKey), callFn(images, apiKey)]);
+  if (a.status === 'rejected' && b.status === 'rejected') throw a.reason;
+  if (a.status === 'fulfilled' && b.status === 'fulfilled') return diffResults(a.value, b.value);
+  const raw = (a.status === 'fulfilled' ? a : b).value;
+  return { items: (raw.items || []).map(it => ({ ...it, confidence: 'medium' })), receipt_totals: raw.receipt_totals };
+}
+
 function toItemsAndTotals(raw) {
   const items = (raw.items || []).map(it => ({
     id: uid(),
     name: String(it.name || 'Okänd vara').trim(),
     price: parsePrice(it.price),
+    confidence: it.confidence || 'high',
     receiptIdx: typeof it.receipt_idx === 'number' ? it.receipt_idx : 0,
   }));
   const receipts = Array.isArray(raw.receipt_totals)
@@ -196,7 +259,8 @@ async function handleAnalyze() {
 
     for (let attempt = 0; attempt <= DELAYS.length; attempt++) {
       try {
-        const { items, receipts } = toItemsAndTotals(await callGemini(state.images, state.apiKey));
+        setState({ loadingMessage: attempt === 0 ? 'Analyserar kvitton (dubbel kontroll)…' : state.loadingMessage });
+        const { items, receipts } = toItemsAndTotals(await analyzeWithDual(callGemini, state.images, state.apiKey));
         setState({ loading: false, loadingMessage: '', items, receipts, step: 2 });
         return;
       } catch (e) {
@@ -221,7 +285,8 @@ async function handleAnalyze() {
 
   // ── Claude-fallback ──
   try {
-    const { items, receipts } = toItemsAndTotals(await callClaude(state.images, state.claudeApiKey));
+    setState({ loadingMessage: 'Gemini otillgänglig — provar Claude Haiku (dubbel kontroll)…' });
+    const { items, receipts } = toItemsAndTotals(await analyzeWithDual(callClaude, state.images, state.claudeApiKey));
     setState({ loading: false, loadingMessage: '', items, receipts, step: 2 });
   } catch (e) {
     setState({ loading: false, loadingMessage: '', error: `Claude: ${e.message}` });
@@ -497,12 +562,20 @@ function renderStep1() {
 }
 
 function renderItemRow(item, isWarned) {
+  const conf = item.confidence || 'high';
+  const confClass = conf !== 'high' ? ` item-row--conf-${conf}` : '';
+  const confBadge = conf === 'low'
+    ? `<span class="conf-badge conf-badge--low" title="Osäker läsning — verifiera">Osäker</span>`
+    : conf === 'medium'
+    ? `<span class="conf-badge conf-badge--medium" title="Liten prisskillnad mellan tolkningarna">Kontrollera</span>`
+    : '';
   return `
-    <div class="item-row${isWarned ? ' item-row--warn' : ''}">
+    <div class="item-row${confClass}${isWarned ? ' item-row--warn' : ''}">
       <input class="item-name-input" type="text" value="${esc(item.name)}"
         data-name-id="${item.id}" placeholder="Varunamn" inputmode="text">
       <input class="item-price-input" type="number" value="${item.price || ''}"
         data-price-id="${item.id}" placeholder="0" step="0.01" inputmode="decimal">
+      ${confBadge}
       <button class="btn btn-danger" data-remove-item="${item.id}" aria-label="Ta bort">🗑</button>
     </div>`;
 }

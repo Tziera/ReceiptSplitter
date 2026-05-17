@@ -633,7 +633,23 @@ body {
 }
 .api-key-input:focus { outline: 2px solid var(--primary); border-color: transparent; }
 
-/* ─── Item row warning state ─── */
+/* ─── Item row confidence states ─── */
+.item-row--conf-medium { border-left: 3px solid #f59e0b; padding-left: 11px; }
+.item-row--conf-low    { border-left: 3px solid #ef4444; padding-left: 11px; }
+
+.conf-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  letter-spacing: 0.02em;
+}
+.conf-badge--medium { background: #fef3c7; color: #92400e; }
+.conf-badge--low    { background: #fee2e2; color: #991b1b; }
+
+/* ─── Item row warning state (total mismatch — takes priority over conf borders) ─── */
 .item-row--warn { border-left: 3px solid #fbbf24; padding-left: 11px; }
 
 /* ─── Receipt group (multi-receipt grouping) ─── */

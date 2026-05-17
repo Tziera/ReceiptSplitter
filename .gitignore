@@ -1,0 +1,5 @@
+# API-nycklar
+.env
+
+# Testkvitton (bilder och ground truth-data är personliga — lägg till dina egna lokalt)
+test/receipts/
