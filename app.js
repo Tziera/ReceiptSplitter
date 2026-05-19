@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.0.3';
+const APP_VERSION = '1.1.0';
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -17,6 +17,7 @@ const state = {
   loading: false,
   loadingMessage: '',
   error: null,
+  debugData: null,
 };
 
 if (!state.apiKey && !state.claudeApiKey) state.showApiKeyScreen = true;
@@ -34,14 +35,15 @@ function setState(patch) {
 async function callGemini(images, apiKey) {
   const prompt = `Analysera kvittot/kvittona i bilden/bilderna. Extrahera alla enskilda varor, priser och rabatter.
 Returnera ENBART giltig JSON utan kodblock, utan förklaringar, precis i detta format:
-{"items":[{"name":"Varunamn","price":12.50,"confidence":"high"}],"receipt_totals":[125.00]}
+{"items":[{"name":"Varunamn","price":12.50,"confidence":"high","receipt_idx":0}],"receipt_totals":[125.00]}
 Regler:
 - price ska vara ett tal (inte en sträng), med decimalpunkt
 - confidence ska vara "high", "medium" eller "low" beroende på hur tydlig texten/siffran är i bilden
 - Inkludera BARA enskilda varor och rabattrader i items – exkludera totalsummor, delsummor och momsrader
 - Rabatter som visas som separata rader (t.ex. "Rabatt -10 kr") ska inkluderas med negativt price
-- receipt_totals: lista slutbeloppet att betala (efter rabatter) per kvitto du ser i bilderna. Använd null om totalsumman ej är synlig. Om flera bilder visar SAMMA kvitto, ge ett enda värde.
-- Lägg till receipt_idx (0-baserat heltal) på varje item för att ange vilket kvitto i receipt_totals det tillhör
+- Bilderna är numrerade från 0 i den ordning de bifogas
+- receipt_idx: 0-baserat heltal som anger vilken bild (i bifogningsordningen) varan hittades i
+- receipt_totals: ett värde per bifogad bild i exakt bildordningen — slutbeloppet (efter rabatter) för den bildens kvitto, eller null om det inte syns
 - Om ett pris är oklart, uppskatta rimligt`;
 
   const parts = [{ text: prompt }];
@@ -102,13 +104,14 @@ async function callClaude(images, apiKey) {
     type: 'text',
     text: `Analysera kvittot/kvittona i bilderna. Extrahera alla enskilda varor, priser och rabatter.
 Returnera ENBART giltig JSON utan kodblock:
-{"items":[{"name":"Varunamn","price":12.50,"confidence":"high"}],"receipt_totals":[125.00]}
+{"items":[{"name":"Varunamn","price":12.50,"confidence":"high","receipt_idx":0}],"receipt_totals":[125.00]}
 - price ska vara ett tal med decimalpunkt
 - confidence ska vara "high", "medium" eller "low" beroende på hur tydlig texten/siffran är i bilden
 - Inkludera BARA enskilda varor och rabattrader i items – exkludera totalsummor, delsummor och momsrader
 - Rabatter som visas som separata rader inkluderas med negativt price
-- receipt_totals: slutbeloppet per kvitto (efter rabatter), null om ej synlig. Samma kvitto i flera bilder = ett värde.
-- Lägg till receipt_idx (0-baserat heltal) på varje item för att ange vilket kvitto i receipt_totals det tillhör
+- Bilderna är numrerade från 0 i den ordning de bifogas
+- receipt_idx: 0-baserat heltal för vilken bild (i bifogningsordningen) varan hittades i
+- receipt_totals: ett värde per bifogad bild i exakt bildordningen, null om ej synlig
 - Om pris är oklart, uppskatta`,
   });
 
@@ -170,127 +173,145 @@ function removeImage(id) {
   setState({ images: state.images.filter(img => img.id !== id) });
 }
 
-function normalizeName(name) {
-  return String(name).toLowerCase().trim().replace(/\s+/g, ' ');
-}
 
-const CONF_RANK = { high: 2, medium: 1, low: 0 };
-function worstConf(...confs) {
-  const rank = Math.min(...confs.map(c => CONF_RANK[c] ?? 2));
-  return ['low', 'medium', 'high'][rank];
-}
+async function handleAnalyze() {
+  if (!state.images.length) return;
+  setState({ loading: true, error: null, loadingMessage: 'Analyserar kvitton…' });
 
-function diffResults(rawA, rawB) {
-  const itemsA = rawA.items || [];
-  const itemsB = rawB.items || [];
-  const usedB = new Set();
-  const result = [];
+  const BATCH1 = 4;       // Fas 1: Gemini batchstorlek
+  const BATCH2 = 2;       // Fas 2+: batchstorlek vid retry
+  const THRESHOLD = 1.0;  // kr — tillåten diff mellan varorsumma och kvittots totalsumma
+  const N = state.images.length;
 
-  for (const a of itemsA) {
-    const normA = normalizeName(a.name);
-    let bestJ = -1, bestScore = 0;
-    itemsB.forEach((b, j) => {
-      if (usedB.has(j)) return;
-      const normB = normalizeName(b.name);
-      const score = normA === normB ? 2 : (normA.includes(normB) || normB.includes(normA)) ? 1 : 0;
-      if (score > bestScore) { bestScore = score; bestJ = j; }
-    });
+  const imagesMeta = state.images.map(img => ({
+    name: img.file.name, size: img.file.size, type: img.file.type || 'image/jpeg',
+  }));
 
-    if (bestJ >= 0) {
-      const b = itemsB[bestJ];
-      usedB.add(bestJ);
-      const pa = parsePrice(a.price), pb = parsePrice(b.price);
-      const diff = Math.abs(pa - pb);
-      const diffConf = diff <= 0.50 ? 'high' : diff <= 5.00 ? 'medium' : 'low';
-      result.push({
-        name: a.name,
-        price: diff <= 0.50 ? pa : (pa + pb) / 2,
-        confidence: worstConf(diffConf, a.confidence || 'high', b.confidence || 'high'),
-        receipt_idx: a.receipt_idx ?? 0,
-      });
-    } else {
-      result.push({ name: a.name, price: parsePrice(a.price), confidence: 'low', receipt_idx: a.receipt_idx ?? 0 });
+  // Ett slot per bild — fylls i allt eftersom
+  const slots = Array.from({ length: N }, (_, i) => ({ i, items: [], total: null, model: null }));
+
+  const chunk = (arr, n) => {
+    const out = [];
+    for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+    return out;
+  };
+
+  // Kör ett anrop och fyll relevanta slots. receipt_idx i svaret antas motsvara bildposition i batchen.
+  async function runBatch(globalIdxs, callFn, apiKey, modelName) {
+    const raw = await callFn(globalIdxs.map(i => state.images[i]), apiKey);
+    for (let j = 0; j < globalIdxs.length; j++) {
+      const gi = globalIdxs[j];
+      slots[gi].items = (raw.items || [])
+        .filter(it => (typeof it.receipt_idx === 'number' ? it.receipt_idx : 0) === j)
+        .map(it => ({ ...it, receipt_idx: gi }));
+      slots[gi].total = Array.isArray(raw.receipt_totals) ? (raw.receipt_totals[j] ?? null) : null;
+      slots[gi].model = modelName;
     }
   }
 
-  itemsB.forEach((b, j) => {
-    if (!usedB.has(j)) {
-      result.push({ name: b.name, price: parsePrice(b.price), confidence: 'low', receipt_idx: b.receipt_idx ?? 0 });
+  const isMismatch = gi => {
+    const { total, items } = slots[gi];
+    if (total === null) return false;
+    return Math.abs(items.reduce((s, it) => s + parsePrice(it.price), 0) - total) > THRESHOLD;
+  };
+
+  // Kör Gemini-batch med retry vid hög belastning. Returnerar 'ok' eller 'quota', kastar vid annan fel.
+  async function runGeminiBatch(globalIdxs, label) {
+    const DELAYS = [5, 10, 20];
+    for (let attempt = 0; attempt <= DELAYS.length; attempt++) {
+      try {
+        if (label && attempt === 0) setState({ loadingMessage: label });
+        await runBatch(globalIdxs, callGemini, state.apiKey, 'Gemini');
+        return 'ok';
+      } catch (e) {
+        const isHighDemand = e.message.toLowerCase().includes('high demand');
+        const isQuota = e.message.includes('429') || e.message.toLowerCase().includes('quota');
+        if (isQuota) return 'quota';
+        if (!isHighDemand || attempt === DELAYS.length) throw e;
+        const d = DELAYS[attempt];
+        for (let s = d; s > 0; s--) {
+          setState({ loadingMessage: `Gemini: hög belastning — försöker om ${s} s…` });
+          await sleep(1000);
+        }
+      }
     }
-  });
+  }
 
-  return { items: result, receipt_totals: rawA.receipt_totals ?? rawB.receipt_totals };
-}
+  const toClaudeSet = new Set();
 
-async function analyzeWithDual(callFn, images, apiKey) {
-  const [a, b] = await Promise.allSettled([callFn(images, apiKey), callFn(images, apiKey)]);
-  if (a.status === 'rejected' && b.status === 'rejected') throw a.reason;
-  if (a.status === 'fulfilled' && b.status === 'fulfilled') return diffResults(a.value, b.value);
-  const raw = (a.status === 'fulfilled' ? a : b).value;
-  return { items: (raw.items || []).map(it => ({ ...it, confidence: 'medium' })), receipt_totals: raw.receipt_totals };
-}
+  // ── Fas 1: Gemini i batchar om BATCH1 ────────────────────────────────────────
+  if (state.apiKey) {
+    const batches = chunk(Array.from({ length: N }, (_, i) => i), BATCH1);
+    let abortAt = batches.length;
 
-function toItemsAndTotals(raw) {
-  const items = (raw.items || []).map(it => ({
+    for (let bi = 0; bi < batches.length; bi++) {
+      const label = batches.length > 1
+        ? `Analyserar kvitton… (${bi + 1}/${batches.length})`
+        : 'Analyserar kvitton…';
+      try {
+        if (await runGeminiBatch(batches[bi], label) === 'quota') { abortAt = bi; break; }
+      } catch { abortAt = bi; break; }
+    }
+    batches.slice(abortAt).flat().forEach(gi => toClaudeSet.add(gi));
+
+    // ── Fas 2: Gemini retry för mismatchar i batchar om BATCH2 ───────────────────
+    const mismatched = Array.from({ length: N }, (_, i) => i)
+      .filter(gi => !toClaudeSet.has(gi) && isMismatch(gi));
+
+    if (mismatched.length) {
+      setState({ loadingMessage: `Kontrollerar ${mismatched.length} kvitto${mismatched.length > 1 ? 'n' : ''} igen…` });
+      for (const batch of chunk(mismatched, BATCH2)) {
+        try {
+          if (await runGeminiBatch(batch, null) === 'quota') batch.forEach(gi => toClaudeSet.add(gi));
+          else batch.filter(isMismatch).forEach(gi => toClaudeSet.add(gi));
+        } catch { batch.forEach(gi => toClaudeSet.add(gi)); }
+      }
+    }
+  } else {
+    Array.from({ length: N }, (_, i) => i).forEach(gi => toClaudeSet.add(gi));
+  }
+
+  // ── Fas 3: Claude för kvarvarande ────────────────────────────────────────────
+  if (toClaudeSet.size > 0) {
+    if (!state.claudeApiKey) {
+      if (slots.every(s => !s.items.length)) {
+        setState({ loading: false, loadingMessage: '', error: 'Gemini otillgänglig och ingen Claude-nyckel konfigurerad.' });
+        return;
+      }
+      // Delvis resultat — fortsätt med vad vi har, tomma slots syns som tomma kvittogrupper
+    } else {
+      const claudeIdxs = [...toClaudeSet];
+      setState({ loadingMessage: `Provar Claude Haiku för ${claudeIdxs.length} kvitto${claudeIdxs.length > 1 ? 'n' : ''}…` });
+      for (const batch of chunk(claudeIdxs, BATCH2)) {
+        try {
+          await runBatch(batch, callClaude, state.claudeApiKey, 'Claude');
+        } catch { /* slots förblir tomma — UI visar mismatch-varning */ }
+      }
+    }
+  }
+
+  // ── Kombinera alla slots ──────────────────────────────────────────────────────
+  const allRawItems = slots.flatMap(s => s.items);
+  const receipts = slots.map((s, i) => ({ name: `Kvitto ${i + 1}`, total: s.total }));
+  if (!receipts.length) receipts.push({ name: 'Kvitto 1', total: null });
+
+  const items = allRawItems.map(it => ({
     id: uid(),
     name: String(it.name || 'Okänd vara').trim(),
     price: parsePrice(it.price),
     confidence: it.confidence || 'high',
     receiptIdx: typeof it.receipt_idx === 'number' ? it.receipt_idx : 0,
   }));
-  const receipts = Array.isArray(raw.receipt_totals)
-    ? raw.receipt_totals.map((t, i) => ({
-        name: `Kvitto ${i + 1}`,
-        total: (t === null || t === undefined) ? null : parsePrice(t),
-      }))
-    : [{ name: 'Kvitto 1', total: null }];
-  if (!receipts.length) receipts.push({ name: 'Kvitto 1', total: null });
-  return { items, receipts };
-}
 
-async function handleAnalyze() {
-  if (!state.images.length) return;
-  setState({ loading: true, error: null, loadingMessage: '' });
-
-  // ── Gemini med retries ──
-  if (state.apiKey) {
-    const DELAYS = [5, 10, 20];
-    let geminiError = null;
-
-    for (let attempt = 0; attempt <= DELAYS.length; attempt++) {
-      try {
-        setState({ loadingMessage: attempt === 0 ? 'Analyserar kvitton (dubbel kontroll)…' : state.loadingMessage });
-        const { items, receipts } = toItemsAndTotals(await analyzeWithDual(callGemini, state.images, state.apiKey));
-        setState({ loading: false, loadingMessage: '', items, receipts, step: 2 });
-        return;
-      } catch (e) {
-        const isHighDemand = e.message.toLowerCase().includes('high demand');
-        if (!isHighDemand || attempt === DELAYS.length) { geminiError = e; break; }
-        const delay = DELAYS[attempt];
-        for (let s = delay; s > 0; s--) {
-          setState({ loadingMessage: `Gemini: hög belastning — försöker om ${s} s (försök ${attempt + 2}/${DELAYS.length + 1})` });
-          await sleep(1000);
-        }
-      }
-    }
-
-    // Om Claude-nyckel finns, försök med den som fallback
-    if (state.claudeApiKey) {
-      setState({ loadingMessage: 'Gemini otillgänglig — provar Claude Haiku…' });
-    } else {
-      setState({ loading: false, loadingMessage: '', error: geminiError.message });
-      return;
-    }
-  }
-
-  // ── Claude-fallback ──
-  try {
-    setState({ loadingMessage: 'Gemini otillgänglig — provar Claude Haiku (dubbel kontroll)…' });
-    const { items, receipts } = toItemsAndTotals(await analyzeWithDual(callClaude, state.images, state.claudeApiKey));
-    setState({ loading: false, loadingMessage: '', items, receipts, step: 2 });
-  } catch (e) {
-    setState({ loading: false, loadingMessage: '', error: `Claude: ${e.message}` });
-  }
+  const modelsUsed = [...new Set(slots.map(s => s.model).filter(Boolean))].join(' + ') || 'Gemini';
+  setState({
+    loading: false, loadingMessage: '', items, receipts, step: 2,
+    debugData: {
+      imagesMeta,
+      raw: { items: allRawItems, receipt_totals: slots.map(s => s.total) },
+      model: modelsUsed,
+    },
+  });
 }
 
 // Reads current item values from DOM inputs before any structural re-render
@@ -424,6 +445,7 @@ function saveApiKeys(geminiKey, claudeKey) {
 function reset() {
   Object.assign(state, {
     step: 1, images: [], items: [], receipts: [], people: [], assignments: {}, loading: false, error: null,
+    debugData: null,
   });
   render();
 }
@@ -654,6 +676,83 @@ function renderReceiptCheck() {
   </div>`;
 }
 
+function renderDebugPanel() {
+  if (!state.debugData) return '';
+  const { imagesMeta, raw, model } = state.debugData;
+
+  const metaHtml = imagesMeta.map(m => {
+    const sizeStr = m.size >= 1024 * 1024
+      ? `${(m.size / 1024 / 1024).toFixed(1)} MB`
+      : `${Math.round(m.size / 1024)} KB`;
+    const isHeic = /heic|heif/i.test(m.type) || /\.heic$/i.test(m.name);
+    const heicTag = isHeic
+      ? ` <span class="debug-tag debug-tag--warn">HEIC – begränsat API-stöd</span>` : '';
+    return `<div class="debug-img-row">
+      <span class="debug-img-name">${esc(m.name)}</span>
+      <span class="debug-img-detail">${esc(m.type)} · ${sizeStr}${heicTag}</span>
+    </div>`;
+  }).join('');
+
+  const count = raw.items?.length ?? '–';
+  const total = raw.receipt_totals?.[0];
+  const summary = raw.error
+    ? `Fel: ${esc(raw.error)}`
+    : `${count} varor${total != null ? ' · ' + total.toFixed(2) + ' kr' : ''}`;
+
+  return `
+    <details class="debug-panel">
+      <summary>🔍 Diagnosinfo (${esc(model)})</summary>
+      <div class="debug-content">
+        <div class="debug-section">
+          <div class="debug-label">Bilder</div>
+          ${metaHtml}
+        </div>
+        <div class="debug-section">
+          <div class="debug-label">API-svar</div>
+          <div class="debug-call${raw.error ? ' debug-call--err' : ''}">
+            <div>${summary}</div>
+          </div>
+        </div>
+        <details class="debug-raw-wrap">
+          <summary>Visa rådata JSON</summary>
+          <pre class="debug-raw">${esc(JSON.stringify(raw, null, 2))}</pre>
+        </details>
+        <button class="btn-debug-export" id="export-test-btn">💾 Spara som testfall</button>
+      </div>
+    </details>`;
+}
+
+function exportTestCase() {
+  collectItems();
+  const items = state.items.map(it => ({ name: it.name.trim(), price: it.price }));
+  const total = state.receipts[0]?.total ?? null;
+  const data = total !== null ? { items, total } : { items };
+  const json = JSON.stringify(data, null, 2);
+
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'kvitto.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+
+  state.images.forEach((img, i) => {
+    const ext = img.file.name.includes('.') ? img.file.name.split('.').pop() : 'jpg';
+    const name = state.images.length === 1 ? `kvitto.${ext}` : `kvitto_${i + 1}.${ext}`;
+    setTimeout(() => {
+      const link = document.createElement('a');
+      link.href = img.dataUrl;
+      link.download = name;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }, (i + 1) * 300);
+  });
+}
+
 function renderStep2() {
   const numReceipts = state.receipts.length;
   const TOLERANCE = 0.50;
@@ -712,7 +811,8 @@ function renderStep2() {
     ${itemsHtml}
     ${state.items.length ? `<p class="total-line" id="total-display">Totalt: <strong>${fmt(total)} kr</strong></p>` : ''}
     ${numReceipts <= 1 ? renderReceiptCheck() : ''}
-    <button class="btn btn-add" id="add-item-btn">+ Lägg till vara</button>`;
+    <button class="btn btn-add" id="add-item-btn">+ Lägg till vara</button>
+    ${renderDebugPanel()}`;
 }
 
 function renderStep3() {
@@ -873,6 +973,7 @@ function bindStepEvents() {
   document.querySelectorAll('[data-rcpt-total], [data-rcpt-name]').forEach(input =>
     input.addEventListener('blur', () => { collectItems(); collectReceipts(); setState({}); })
   );
+  el('export-test-btn')?.addEventListener('click', exportTestCase);
 
   // Step 3
   const doAddPerson = () => {
