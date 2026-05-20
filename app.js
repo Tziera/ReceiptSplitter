@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -18,6 +18,8 @@ const state = {
   loadingMessage: '',
   error: null,
   debugData: null,
+  rerunningReceiptIdx: null,
+  rerunMessage: null, // {text, ok} or null
 };
 
 if (!state.apiKey && !state.claudeApiKey) state.showApiKeyScreen = true;
@@ -158,11 +160,11 @@ function handleImageFiles(files) {
   const arr = Array.from(files);
   if (!arr.length) return;
   let pending = arr.length;
-  const newImgs = [];
-  arr.forEach(file => {
+  const newImgs = new Array(arr.length).fill(null);
+  arr.forEach((file, idx) => {
     const reader = new FileReader();
     reader.onload = e => {
-      newImgs.push({ id: uid(), file, dataUrl: e.target.result });
+      newImgs[idx] = { id: uid(), file, dataUrl: e.target.result };
       if (--pending === 0) setState({ images: [...state.images, ...newImgs], error: null });
     };
     reader.readAsDataURL(file);
@@ -314,6 +316,95 @@ async function handleAnalyze() {
   });
 }
 
+async function reanalyzeReceipt(ri) {
+  if (state.rerunningReceiptIdx !== null) return;
+  collectItems();
+  collectReceipts();
+
+  const image = state.images[ri];
+  if (!image) return;
+
+  const currentTotal = state.receipts[ri]?.total ?? null;
+  if (currentTotal === null) {
+    setState({ rerunMessage: { text: 'Ingen kvittototal att jämföra mot — ange totalen manuellt och försök igen.', ok: false } });
+    return;
+  }
+
+  const currentSum = state.items.filter(it => (it.receiptIdx ?? 0) === ri).reduce((s, it) => s + it.price, 0);
+  const currentDiff = Math.abs(currentSum - currentTotal);
+
+  setState({ rerunningReceiptIdx: ri, rerunMessage: null, error: null });
+
+  let newRaw = null;
+  let usedModel = null;
+
+  if (state.apiKey) {
+    const DELAYS = [5, 10, 20];
+    let quotaError = false;
+    let otherError = null;
+    for (let attempt = 0; attempt <= DELAYS.length; attempt++) {
+      try {
+        newRaw = await callGemini([image], state.apiKey);
+        usedModel = 'Gemini';
+        break;
+      } catch (e) {
+        const isQuota = e.message.includes('429') || e.message.toLowerCase().includes('quota');
+        const isHighDemand = e.message.toLowerCase().includes('high demand');
+        if (isQuota) { quotaError = true; break; }
+        if (!isHighDemand || attempt === DELAYS.length) { otherError = e; break; }
+        const d = DELAYS[attempt];
+        for (let s = d; s > 0; s--) { setState({ rerunningReceiptIdx: ri }); await sleep(1000); }
+      }
+    }
+    if (otherError) { setState({ rerunningReceiptIdx: null, error: `Fel vid omanalys: ${otherError.message}` }); return; }
+    if (quotaError) {
+      if (!state.claudeApiKey) { setState({ rerunningReceiptIdx: null, error: 'Gemini-kvot slut och ingen Claude-nyckel konfigurerad.' }); return; }
+      try { newRaw = await callClaude([image], state.claudeApiKey); usedModel = 'Claude'; }
+      catch (e) { setState({ rerunningReceiptIdx: null, error: `Fel vid omanalys med Claude: ${e.message}` }); return; }
+    }
+  } else if (state.claudeApiKey) {
+    try { newRaw = await callClaude([image], state.claudeApiKey); usedModel = 'Claude'; }
+    catch (e) { setState({ rerunningReceiptIdx: null, error: `Fel vid omanalys: ${e.message}` }); return; }
+  } else {
+    setState({ rerunningReceiptIdx: null, error: 'Ingen API-nyckel konfigurerad.' });
+    return;
+  }
+
+  const newItems = (newRaw.items || [])
+    .filter(it => (typeof it.receipt_idx === 'number' ? it.receipt_idx : 0) === 0)
+    .map(it => ({
+      id: uid(),
+      name: String(it.name || 'Okänd vara').trim(),
+      price: parsePrice(it.price),
+      confidence: it.confidence || 'high',
+      receiptIdx: ri,
+    }));
+
+  const newTotal = Array.isArray(newRaw.receipt_totals) ? (newRaw.receipt_totals[0] ?? null) : null;
+  const newSum = newItems.reduce((s, it) => s + it.price, 0);
+  const newDiff = Math.abs(newSum - currentTotal);
+
+  if (newDiff >= currentDiff) {
+    setState({
+      rerunningReceiptIdx: null,
+      rerunMessage: { text: `Omanalys (${usedModel}): inget bättre resultat — diff ${fmt(newDiff)} kr vs ${fmt(currentDiff)} kr.`, ok: false },
+    });
+    return;
+  }
+
+  const otherItems = state.items.filter(it => (it.receiptIdx ?? 0) !== ri);
+  const updatedReceipts = [...state.receipts];
+  if (newTotal !== null) updatedReceipts[ri] = { ...updatedReceipts[ri], total: newTotal };
+
+  setState({
+    items: [...otherItems, ...newItems],
+    receipts: updatedReceipts,
+    rerunningReceiptIdx: null,
+    rerunMessage: { text: `Kvitto ${ri + 1} uppdaterat (${usedModel}) — diff minskade från ${fmt(currentDiff)} till ${fmt(newDiff)} kr.`, ok: true },
+  });
+  setTimeout(() => setState({ rerunMessage: null }), 4000);
+}
+
 // Reads current item values from DOM inputs before any structural re-render
 function collectItems() {
   document.querySelectorAll('[data-name-id]').forEach(input => {
@@ -343,11 +434,11 @@ function collectReceipts() {
 function addItem() {
   collectItems();
   collectReceipts();
-  setState({ items: [...state.items, { id: uid(), name: '', price: 0, receiptIdx: 0 }] });
-  // Focus the new name input after render
+  const newId = uid();
+  const lastReceiptIdx = Math.max(0, state.receipts.length - 1);
+  setState({ items: [...state.items, { id: newId, name: '', price: 0, receiptIdx: lastReceiptIdx }] });
   setTimeout(() => {
-    const inputs = document.querySelectorAll('[data-name-id]');
-    if (inputs.length) inputs[inputs.length - 1].focus();
+    document.querySelector(`[data-name-id="${newId}"]`)?.focus();
   }, 50);
 }
 
@@ -444,8 +535,8 @@ function saveApiKeys(geminiKey, claudeKey) {
 
 function reset() {
   Object.assign(state, {
-    step: 1, images: [], items: [], receipts: [], people: [], assignments: {}, loading: false, error: null,
-    debugData: null,
+    step: 1, images: [], items: [], receipts: [], people: [], assignments: {}, loading: false,
+    loadingMessage: '', error: null, debugData: null, rerunningReceiptIdx: null, rerunMessage: null,
   });
   render();
 }
@@ -619,12 +710,19 @@ function renderReceiptGroupHeader(receipt, idx, itemSum, isMismatch) {
         value="${receipt.total !== null ? receipt.total : ''}" placeholder="?" step="0.01" inputmode="decimal"> kr`;
   }
 
+  const isRerunning = state.rerunningReceiptIdx === idx;
+  const canRerun = !!state.images[idx] && state.rerunningReceiptIdx === null && hasTotal;
+  const rerunBtn = isRerunning
+    ? `<span class="rgh-spinner" title="Analyserar…">⟳</span>`
+    : `<button class="btn-rerun" data-rerun-idx="${idx}" ${!canRerun ? 'disabled' : ''} title="Kör om OCR för detta kvitto">🔄</button>`;
+
   return `<div class="receipt-group-header ${statusClass}">
     <span class="rgh-icon">${icon}</span>
     <div class="rgh-content">
       <input class="rgh-name-input" type="text" value="${esc(receipt.name)}" data-rcpt-name="${idx}" placeholder="Kvitto ${idx + 1}">
       <div class="rgh-info">${totalInfo}</div>
     </div>
+    ${rerunBtn}
   </div>`;
 }
 
@@ -808,6 +906,7 @@ function renderStep2() {
 
   return `
     <h2 class="section-title">Granska varor</h2>
+    ${state.rerunMessage ? `<div class="rerun-banner rerun-banner--${state.rerunMessage.ok ? 'ok' : 'warn'}">${esc(state.rerunMessage.text)}</div>` : ''}
     ${itemsHtml}
     ${state.items.length ? `<p class="total-line" id="total-display">Totalt: <strong>${fmt(total)} kr</strong></p>` : ''}
     ${numReceipts <= 1 ? renderReceiptCheck() : ''}
@@ -972,6 +1071,9 @@ function bindStepEvents() {
   // Step 2 — receipt name/total inputs update validation on blur
   document.querySelectorAll('[data-rcpt-total], [data-rcpt-name]').forEach(input =>
     input.addEventListener('blur', () => { collectItems(); collectReceipts(); setState({}); })
+  );
+  document.querySelectorAll('[data-rerun-idx]').forEach(btn =>
+    btn.addEventListener('click', () => reanalyzeReceipt(+btn.dataset.rerunIdx))
   );
   el('export-test-btn')?.addEventListener('click', exportTestCase);
 
