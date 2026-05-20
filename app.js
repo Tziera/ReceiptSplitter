@@ -249,6 +249,8 @@ if (!state.apiKey && !state.claudeApiKey) state.showApiKeyScreen = true;
 let _nextId = 1;
 const uid = () => String(_nextId++);
 
+let _cancelRequested = false;
+
 function setState(patch) {
   Object.assign(state, patch);
   render();
@@ -399,6 +401,7 @@ function removeImage(id) {
 
 async function handleAnalyze() {
   if (!state.images.length) return;
+  _cancelRequested = false;
   setState({ loading: true, error: null, loadingMessage: t('loadingAnalyzing') });
 
   const BATCH1 = 4;
@@ -450,9 +453,11 @@ async function handleAnalyze() {
         if (!isHighDemand || attempt === DELAYS.length) throw e;
         const d = DELAYS[attempt];
         for (let s = d; s > 0; s--) {
+          if (_cancelRequested) return 'cancelled';
           setState({ loadingMessage: t('loadingGeminiRetry', { n: s }) });
           await sleep(1000);
         }
+        if (_cancelRequested) return 'cancelled';
       }
     }
   }
@@ -468,9 +473,12 @@ async function handleAnalyze() {
         ? t('loadingAnalyzingBatch', { current: bi + 1, total: batches.length })
         : t('loadingAnalyzing');
       try {
-        if (await runGeminiBatch(batches[bi], label) === 'quota') { abortAt = bi; break; }
+        const result = await runGeminiBatch(batches[bi], label);
+        if (result === 'cancelled') return;
+        if (result === 'quota') { abortAt = bi; break; }
       } catch { abortAt = bi; break; }
     }
+    if (_cancelRequested) return;
     batches.slice(abortAt).flat().forEach(gi => toClaudeSet.add(gi));
 
     const mismatched = Array.from({ length: N }, (_, i) => i)
@@ -479,8 +487,11 @@ async function handleAnalyze() {
     if (mismatched.length) {
       setState({ loadingMessage: t('loadingRecheckReceipts', { n: mismatched.length }) });
       for (const batch of chunk(mismatched, BATCH2)) {
+        if (_cancelRequested) return;
         try {
-          if (await runGeminiBatch(batch, null) === 'quota') batch.forEach(gi => toClaudeSet.add(gi));
+          const result = await runGeminiBatch(batch, null);
+          if (result === 'cancelled') return;
+          if (result === 'quota') batch.forEach(gi => toClaudeSet.add(gi));
           else batch.filter(isMismatch).forEach(gi => toClaudeSet.add(gi));
         } catch { batch.forEach(gi => toClaudeSet.add(gi)); }
       }
@@ -488,6 +499,8 @@ async function handleAnalyze() {
   } else {
     Array.from({ length: N }, (_, i) => i).forEach(gi => toClaudeSet.add(gi));
   }
+
+  if (_cancelRequested) return;
 
   if (toClaudeSet.size > 0) {
     if (!state.claudeApiKey) {
@@ -499,12 +512,15 @@ async function handleAnalyze() {
       const claudeIdxs = [...toClaudeSet];
       setState({ loadingMessage: t('loadingClaude', { n: claudeIdxs.length }) });
       for (const batch of chunk(claudeIdxs, BATCH2)) {
+        if (_cancelRequested) return;
         try {
           await runBatch(batch, callClaude, state.claudeApiKey, 'Claude');
         } catch { /* slots remain empty — UI shows mismatch warning */ }
       }
     }
   }
+
+  if (_cancelRequested) return;
 
   const allRawItems = slots.flatMap(s => s.items);
   const receipts = slots.map((s, i) => ({ name: t('receiptName', { n: i + 1 }), total: s.total }));
@@ -745,7 +761,13 @@ function saveApiKeys(geminiKey, claudeKey) {
   setState({ apiKey: g, claudeApiKey: c, showApiKeyScreen: false, error: null });
 }
 
+function cancelAnalysis() {
+  _cancelRequested = true;
+  setState({ loading: false, loadingMessage: '' });
+}
+
 function reset() {
+  _cancelRequested = false;
   Object.assign(state, {
     step: 1, images: [], items: [], receipts: [], people: [], assignments: {}, loading: false,
     loadingMessage: '', error: null, debugData: null, rerunningReceiptIdx: null, rerunMessage: null,
@@ -802,6 +824,7 @@ function render() {
   `;
 
   if (!state.loading) bindStepEvents();
+  else document.getElementById('cancel-analysis-btn')?.addEventListener('click', cancelAnalysis);
 }
 
 function renderHeader() {
@@ -830,6 +853,7 @@ function renderLoading() {
   return `<div class="loading-overlay">
     <div class="spinner"></div>
     <p class="loading-text">${msg}</p>
+    <button class="btn btn-secondary btn-cancel-loading" id="cancel-analysis-btn">${t('cancel')}</button>
   </div>`;
 }
 

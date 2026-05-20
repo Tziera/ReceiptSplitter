@@ -219,6 +219,7 @@ body {
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .loading-text { font-size: 15px; color: var(--text-sec); text-align: center; }
+.btn-cancel-loading { min-width: 140px; }
 
 /* ─── Step 1: Images ─── */
 .file-drop {
