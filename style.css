@@ -874,3 +874,157 @@ body {
 }
 .rerun-banner--ok   { background: #ecfdf5; border: 1px solid #6ee7b7; color: #065f46; }
 .rerun-banner--warn { background: #fffbeb; border: 1px solid #fcd34d; color: #78350f; }
+
+/* ─── Image group badges (step 1) ─── */
+.img-group-badge {
+  position: absolute;
+  bottom: 4px;
+  left: 4px;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  background: rgba(79, 70, 229, 0.9);
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 4px 2px 6px;
+  border-radius: 20px;
+  line-height: 1.3;
+  pointer-events: auto;
+}
+.img-group-badge[data-gi="1"] { background: rgba(5, 150, 105, 0.9); }
+.img-group-badge[data-gi="2"] { background: rgba(217, 119, 6, 0.9); }
+.img-group-badge[data-gi="3"] { background: rgba(220, 38, 38, 0.9); }
+.img-group-badge[data-gi="4"] { background: rgba(139, 92, 246, 0.9); }
+
+.img-unlink-btn {
+  background: rgba(255,255,255,0.25);
+  border: none;
+  color: white;
+  border-radius: 50%;
+  width: 14px;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  cursor: pointer;
+  padding: 0;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.img-unlink-btn:active { background: rgba(255,255,255,0.5); }
+
+/* ─── Link mode selection (step 1) ─── */
+[data-link-select] { cursor: pointer; }
+
+.image-thumb-wrap.img-selected .image-thumb {
+  outline: 3px solid var(--primary);
+  border-radius: var(--radius-sm);
+}
+
+.img-select-mark {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid rgba(255,255,255,0.8);
+  background: rgba(0,0,0,0.3);
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.img-select-mark.selected {
+  background: var(--primary);
+  border-color: white;
+}
+.img-select-mark.selected::after {
+  content: '✓';
+  color: white;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* ─── Link mode toolbar ─── */
+.link-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.btn-link {
+  flex: 1;
+  background: var(--primary-light);
+  color: var(--primary);
+  border: 2px solid var(--primary);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 44px;
+  -webkit-tap-highlight-color: transparent;
+}
+.btn-link:active { background: #dde4ff; }
+
+.btn-link-cancel {
+  background: var(--surface);
+  color: var(--text-sec);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 44px;
+  -webkit-tap-highlight-color: transparent;
+  white-space: nowrap;
+}
+
+.btn-link-confirm {
+  flex: 1;
+  background: var(--primary);
+  color: white;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 44px;
+  -webkit-tap-highlight-color: transparent;
+}
+.btn-link-confirm:active { background: var(--primary-hover); }
+
+.link-hint {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-sec);
+  text-align: center;
+}
+
+.link-mode-hint {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--primary-light);
+  color: var(--primary);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: 16px;
+}
+
+/* ─── Per-receipt add-item button (step 2) ─── */
+.btn-add-in-receipt {
+  border-radius: 0 0 var(--radius) var(--radius);
+  margin-top: 0;
+  border-top: 1px solid var(--border);
+}
+.receipt-group .card { border-radius: 0; }

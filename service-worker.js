@@ -1,4 +1,4 @@
-const CACHE = 'kvittodelare-v5';
+const CACHE = 'kvittodelare-v6';
 const ASSETS = [
   './',
   './index.html',

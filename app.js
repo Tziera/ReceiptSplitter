@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.2.1';
+const APP_VERSION = '1.3.0';
 
 // ─── i18n ─────────────────────────────────────────────────────────────────────
 
@@ -110,6 +110,10 @@ const STRINGS = {
     ariaRemoveItem: 'Remove',
     ariaRemovePerson: ({ name }) => `Remove ${name}`,
     ariaAddPerson: 'Add person',
+    addItemNewReceipt: '+ Add to new receipt',
+    linkImagesBtn: '🔗 Group images',
+    linkConfirmBtn: ({ n }) => `Group ${n}`,
+    unlinkImageBtn: 'Unlink',
   },
   sv: {
     appTitle: '🧾 Kvittodelare',
@@ -214,6 +218,10 @@ const STRINGS = {
     ariaRemoveItem: 'Ta bort',
     ariaRemovePerson: ({ name }) => `Ta bort ${name}`,
     ariaAddPerson: 'Lägg till person',
+    addItemNewReceipt: '+ Lägg till i nytt kvitto',
+    linkImagesBtn: '🔗 Gruppera bilder',
+    linkConfirmBtn: ({ n }) => `Gruppera ${n}`,
+    unlinkImageBtn: 'Dela upp',
   },
 };
 
@@ -242,6 +250,9 @@ const state = {
   debugData: null,
   rerunningReceiptIdx: null,
   rerunMessage: null, // {text, ok} or null
+  imageGroups: [],      // string[][] — image IDs grouped by receipt
+  linkingMode: false,
+  linkSelection: new Set(),
 };
 
 if (!state.apiKey && !state.claudeApiKey) state.showApiKeyScreen = true;
@@ -389,14 +400,67 @@ function handleImageFiles(files) {
     const reader = new FileReader();
     reader.onload = e => {
       newImgs[idx] = { id: uid(), file, dataUrl: e.target.result };
-      if (--pending === 0) setState({ images: [...state.images, ...newImgs], error: null });
+      if (--pending === 0) {
+        const newGroups = newImgs.map(img => [img.id]);
+        setState({
+          images: [...state.images, ...newImgs],
+          imageGroups: [...state.imageGroups, ...newGroups],
+          error: null,
+        });
+      }
     };
     reader.readAsDataURL(file);
   });
 }
 
 function removeImage(id) {
-  setState({ images: state.images.filter(img => img.id !== id) });
+  const newGroups = state.imageGroups
+    .map(g => g.filter(imgId => imgId !== id))
+    .filter(g => g.length > 0);
+  setState({
+    images: state.images.filter(img => img.id !== id),
+    imageGroups: newGroups,
+    linkSelection: new Set([...state.linkSelection].filter(sid => sid !== id)),
+  });
+}
+
+function rebuildImageGroups(assignments) {
+  // assignments: Map<imgId → groupKey> — rebuilds groups ordered by first image appearance
+  const groupMap = new Map();
+  const seenGroups = [];
+  for (const img of state.images) {
+    const key = assignments.get(img.id) ?? img.id;
+    if (!groupMap.has(key)) { groupMap.set(key, []); seenGroups.push(key); }
+    groupMap.get(key).push(img.id);
+  }
+  return seenGroups.map(key => groupMap.get(key));
+}
+
+function toggleLinkSelection(imgId) {
+  const sel = new Set(state.linkSelection);
+  if (sel.has(imgId)) sel.delete(imgId); else sel.add(imgId);
+  setState({ linkSelection: sel });
+}
+
+function linkImages() {
+  if (state.linkSelection.size < 2) return;
+  const assignments = new Map();
+  for (const group of state.imageGroups) {
+    for (const id of group) assignments.set(id, group[0]);
+  }
+  const firstSelected = state.images.find(img => state.linkSelection.has(img.id))?.id;
+  if (!firstSelected) return;
+  for (const id of state.linkSelection) assignments.set(id, firstSelected);
+  setState({ imageGroups: rebuildImageGroups(assignments), linkingMode: false, linkSelection: new Set() });
+}
+
+function unlinkImage(imgId) {
+  const assignments = new Map();
+  for (const group of state.imageGroups) {
+    for (const id of group) assignments.set(id, group[0]);
+  }
+  assignments.set(imgId, imgId);
+  setState({ imageGroups: rebuildImageGroups(assignments) });
 }
 
 async function handleAnalyze() {
@@ -407,29 +471,67 @@ async function handleAnalyze() {
   const BATCH1 = 4;
   const BATCH2 = 2;
   const THRESHOLD = 1.0;
-  const N = state.images.length;
+
+  // Use imageGroups if available, otherwise one group per image
+  const groups = state.imageGroups.length > 0
+    ? state.imageGroups
+    : state.images.map(img => [img.id]);
+  const G = groups.length;
 
   const imagesMeta = state.images.map(img => ({
     name: img.file.name, size: img.file.size, type: img.file.type || 'image/jpeg',
   }));
 
-  const slots = Array.from({ length: N }, (_, i) => ({ i, items: [], total: null, model: null }));
+  const slots = Array.from({ length: G }, (_, i) => ({ i, items: [], total: null, model: null }));
 
-  const chunk = (arr, n) => {
-    const out = [];
-    for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
-    return out;
-  };
+  // Chunk group indices keeping total images per batch ≤ maxImages
+  function chunkGroups(groupIdxs, maxImages) {
+    const batches = [];
+    let current = [];
+    let count = 0;
+    for (const gi of groupIdxs) {
+      const n = groups[gi].length;
+      if (current.length > 0 && count + n > maxImages) { batches.push(current); current = []; count = 0; }
+      current.push(gi);
+      count += n;
+    }
+    if (current.length) batches.push(current);
+    return batches;
+  }
 
-  async function runBatch(globalIdxs, callFn, apiKey, modelName) {
-    const raw = await callFn(globalIdxs.map(i => state.images[i]), apiKey);
-    for (let j = 0; j < globalIdxs.length; j++) {
-      const gi = globalIdxs[j];
-      slots[gi].items = (raw.items || [])
-        .filter(it => (typeof it.receipt_idx === 'number' ? it.receipt_idx : 0) === j)
-        .map(it => ({ ...it, receipt_idx: gi }));
-      slots[gi].total = Array.isArray(raw.receipt_totals) ? (raw.receipt_totals[j] ?? null) : null;
-      slots[gi].model = modelName;
+  async function runBatch(groupIdxs, callFn, apiKey, modelName) {
+    // Build flat image list and image-position → local group index mapping
+    const batchImages = [];
+    const posToLocalJ = [];
+    for (let j = 0; j < groupIdxs.length; j++) {
+      for (const imgId of groups[groupIdxs[j]]) {
+        const img = state.images.find(i => i.id === imgId);
+        if (img) { batchImages.push(img); posToLocalJ.push(j); }
+      }
+    }
+
+    const raw = await callFn(batchImages, apiKey);
+
+    for (const gi of groupIdxs) { slots[gi].items = []; slots[gi].total = null; slots[gi].model = modelName; }
+
+    for (const it of (raw.items || [])) {
+      const pos = typeof it.receipt_idx === 'number' ? it.receipt_idx : 0;
+      const localJ = posToLocalJ[pos] ?? 0;
+      const gi = groupIdxs[localJ];
+      if (gi !== undefined) slots[gi].items.push({ ...it, receipt_idx: gi });
+    }
+
+    if (Array.isArray(raw.receipt_totals)) {
+      const groupLastTotal = {};
+      raw.receipt_totals.forEach((total, pos) => {
+        if (total !== null && total !== undefined) {
+          const localJ = posToLocalJ[pos];
+          if (localJ !== undefined) groupLastTotal[localJ] = total;
+        }
+      });
+      for (let j = 0; j < groupIdxs.length; j++) {
+        if (groupLastTotal[j] !== undefined) slots[groupIdxs[j]].total = groupLastTotal[j];
+      }
     }
   }
 
@@ -439,12 +541,12 @@ async function handleAnalyze() {
     return Math.abs(items.reduce((s, it) => s + parsePrice(it.price), 0) - total) > THRESHOLD;
   };
 
-  async function runGeminiBatch(globalIdxs, label) {
+  async function runGeminiBatch(groupIdxs, label) {
     const DELAYS = [5, 10, 20];
     for (let attempt = 0; attempt <= DELAYS.length; attempt++) {
       try {
         if (label && attempt === 0) setState({ loadingMessage: label });
-        await runBatch(globalIdxs, callGemini, state.apiKey, 'Gemini');
+        await runBatch(groupIdxs, callGemini, state.apiKey, 'Gemini');
         return 'ok';
       } catch (e) {
         const isHighDemand = e.message.toLowerCase().includes('high demand');
@@ -465,7 +567,7 @@ async function handleAnalyze() {
   const toClaudeSet = new Set();
 
   if (state.apiKey) {
-    const batches = chunk(Array.from({ length: N }, (_, i) => i), BATCH1);
+    const batches = chunkGroups(Array.from({ length: G }, (_, i) => i), BATCH1);
     let abortAt = batches.length;
 
     for (let bi = 0; bi < batches.length; bi++) {
@@ -481,12 +583,12 @@ async function handleAnalyze() {
     if (_cancelRequested) return;
     batches.slice(abortAt).flat().forEach(gi => toClaudeSet.add(gi));
 
-    const mismatched = Array.from({ length: N }, (_, i) => i)
+    const mismatched = Array.from({ length: G }, (_, i) => i)
       .filter(gi => !toClaudeSet.has(gi) && isMismatch(gi));
 
     if (mismatched.length) {
       setState({ loadingMessage: t('loadingRecheckReceipts', { n: mismatched.length }) });
-      for (const batch of chunk(mismatched, BATCH2)) {
+      for (const batch of chunkGroups(mismatched, BATCH2)) {
         if (_cancelRequested) return;
         try {
           const result = await runGeminiBatch(batch, null);
@@ -497,7 +599,7 @@ async function handleAnalyze() {
       }
     }
   } else {
-    Array.from({ length: N }, (_, i) => i).forEach(gi => toClaudeSet.add(gi));
+    Array.from({ length: G }, (_, i) => i).forEach(gi => toClaudeSet.add(gi));
   }
 
   if (_cancelRequested) return;
@@ -511,7 +613,7 @@ async function handleAnalyze() {
     } else {
       const claudeIdxs = [...toClaudeSet];
       setState({ loadingMessage: t('loadingClaude', { n: claudeIdxs.length }) });
-      for (const batch of chunk(claudeIdxs, BATCH2)) {
+      for (const batch of chunkGroups(claudeIdxs, BATCH2)) {
         if (_cancelRequested) return;
         try {
           await runBatch(batch, callClaude, state.claudeApiKey, 'Claude');
@@ -550,8 +652,9 @@ async function reanalyzeReceipt(ri) {
   collectItems();
   collectReceipts();
 
-  const image = state.images[ri];
-  if (!image) return;
+  const groupImgIds = state.imageGroups[ri] || [];
+  const groupImages = groupImgIds.map(id => state.images.find(img => img.id === id)).filter(Boolean);
+  if (!groupImages.length) return;
 
   const currentTotal = state.receipts[ri]?.total ?? null;
   if (currentTotal === null) {
@@ -573,7 +676,7 @@ async function reanalyzeReceipt(ri) {
     let otherError = null;
     for (let attempt = 0; attempt <= DELAYS.length; attempt++) {
       try {
-        newRaw = await callGemini([image], state.apiKey);
+        newRaw = await callGemini(groupImages, state.apiKey);
         usedModel = 'Gemini';
         break;
       } catch (e) {
@@ -588,28 +691,28 @@ async function reanalyzeReceipt(ri) {
     if (otherError) { setState({ rerunningReceiptIdx: null, error: t('errRerunFailed', { msg: otherError.message }) }); return; }
     if (quotaError) {
       if (!state.claudeApiKey) { setState({ rerunningReceiptIdx: null, error: t('errGeminiQuota') }); return; }
-      try { newRaw = await callClaude([image], state.claudeApiKey); usedModel = 'Claude'; }
+      try { newRaw = await callClaude(groupImages, state.claudeApiKey); usedModel = 'Claude'; }
       catch (e) { setState({ rerunningReceiptIdx: null, error: t('errRerunClaudeFailed', { msg: e.message }) }); return; }
     }
   } else if (state.claudeApiKey) {
-    try { newRaw = await callClaude([image], state.claudeApiKey); usedModel = 'Claude'; }
+    try { newRaw = await callClaude(groupImages, state.claudeApiKey); usedModel = 'Claude'; }
     catch (e) { setState({ rerunningReceiptIdx: null, error: t('errRerunFailed', { msg: e.message }) }); return; }
   } else {
     setState({ rerunningReceiptIdx: null, error: t('errNoApiKey') });
     return;
   }
 
-  const newItems = (newRaw.items || [])
-    .filter(it => (typeof it.receipt_idx === 'number' ? it.receipt_idx : 0) === 0)
-    .map(it => ({
-      id: uid(),
-      name: String(it.name || t('unknownItem')).trim(),
-      price: parsePrice(it.price),
-      confidence: it.confidence || 'high',
-      receiptIdx: ri,
-    }));
+  const newItems = (newRaw.items || []).map(it => ({
+    id: uid(),
+    name: String(it.name || t('unknownItem')).trim(),
+    price: parsePrice(it.price),
+    confidence: it.confidence || 'high',
+    receiptIdx: ri,
+  }));
 
-  const newTotal = Array.isArray(newRaw.receipt_totals) ? (newRaw.receipt_totals[0] ?? null) : null;
+  const newTotal = Array.isArray(newRaw.receipt_totals)
+    ? (newRaw.receipt_totals.filter(v => v !== null && v !== undefined).pop() ?? null)
+    : null;
   const newSum = newItems.reduce((s, it) => s + it.price, 0);
   const newDiff = Math.abs(newSum - currentTotal);
 
@@ -659,15 +762,20 @@ function collectReceipts() {
   });
 }
 
-function addItem() {
+function addItem(receiptIdx) {
   collectItems();
   collectReceipts();
   const newId = uid();
-  const lastReceiptIdx = Math.max(0, state.receipts.length - 1);
-  setState({ items: [...state.items, { id: newId, name: '', price: 0, receiptIdx: lastReceiptIdx }] });
-  setTimeout(() => {
-    document.querySelector(`[data-name-id="${newId}"]`)?.focus();
-  }, 50);
+  let targetIdx;
+  if (receiptIdx !== undefined) {
+    targetIdx = receiptIdx;
+  } else {
+    // Create a new standalone receipt (no associated image)
+    state.receipts.push({ name: t('receiptName', { n: state.receipts.length + 1 }), total: null });
+    targetIdx = state.receipts.length - 1;
+  }
+  setState({ items: [...state.items, { id: newId, name: '', price: 0, receiptIdx: targetIdx }] });
+  setTimeout(() => document.querySelector(`[data-name-id="${newId}"]`)?.focus(), 50);
 }
 
 function removeItem(id) {
@@ -771,6 +879,7 @@ function reset() {
   Object.assign(state, {
     step: 1, images: [], items: [], receipts: [], people: [], assignments: {}, loading: false,
     loadingMessage: '', error: null, debugData: null, rerunningReceiptIdx: null, rerunMessage: null,
+    imageGroups: [], linkingMode: false, linkSelection: new Set(),
   });
   render();
 }
@@ -892,22 +1001,56 @@ function renderActionBar() {
 // ─── Step renderers ───────────────────────────────────────────────────────────
 
 function renderStep1() {
-  const thumbs = state.images.map(img => `
-    <div class="image-thumb-wrap">
-      <img class="image-thumb" src="${img.dataUrl}" alt="Kvitto">
-      <button class="image-thumb-remove" data-remove-img="${img.id}" aria-label="${t('ariaRemoveImage')}">×</button>
-    </div>`).join('');
+  const numImages = state.images.length;
+
+  // Map imgId → group index
+  const imgGroupIdx = new Map();
+  state.imageGroups.forEach((g, gi) => g.forEach(id => imgGroupIdx.set(id, gi)));
+
+  const thumbs = state.images.map(img => {
+    const gi = imgGroupIdx.get(img.id);
+    const isInGroup = gi !== undefined && (state.imageGroups[gi]?.length ?? 0) > 1;
+    const isSelected = state.linkingMode && state.linkSelection.has(img.id);
+
+    const groupBadge = isInGroup
+      ? `<span class="img-group-badge" data-gi="${gi % 5}">🔗 ${gi + 1}<button class="img-unlink-btn" data-unlink="${img.id}" aria-label="${t('unlinkImageBtn')}">×</button></span>`
+      : '';
+
+    const selectMark = state.linkingMode
+      ? `<div class="img-select-mark${isSelected ? ' selected' : ''}"></div>`
+      : '';
+
+    return `
+      <div class="image-thumb-wrap${isSelected ? ' img-selected' : ''}"${state.linkingMode ? ` data-link-select="${img.id}"` : ''}>
+        <img class="image-thumb" src="${img.dataUrl}" alt="Receipt">
+        ${!state.linkingMode ? `<button class="image-thumb-remove" data-remove-img="${img.id}" aria-label="${t('ariaRemoveImage')}">×</button>` : ''}
+        ${groupBadge}${selectMark}
+      </div>`;
+  }).join('');
+
+  const linkBar = numImages >= 2 ? `
+    <div class="link-bar">
+      ${state.linkingMode
+        ? `<button class="btn-link-cancel" id="link-cancel-btn">${t('cancel')}</button>
+           ${state.linkSelection.size >= 2
+             ? `<button class="btn-link-confirm" id="link-confirm-btn">${t('linkConfirmBtn', { n: state.linkSelection.size })}</button>`
+             : `<span class="link-hint">${LANG === 'sv' ? 'Välj minst 2 bilder' : 'Select 2+ images'}</span>`}`
+        : `<button class="btn-link" id="link-mode-btn">${t('linkImagesBtn')}</button>`}
+    </div>` : '';
 
   return `
     <h2 class="section-title">${t('step1Title')}</h2>
-    <label class="file-drop" for="file-input">
-      <span class="file-drop-icon">📷</span>
-      <span class="file-drop-text">${t('fileDropText')}</span>
-      <span class="file-drop-sub">${t('fileDropSub')}</span>
-    </label>
-    <input type="file" id="file-input" accept="image/*" multiple style="display:none">
-    ${state.images.length ? `<div class="image-grid">${thumbs}</div>` : ''}
-    ${state.images.length ? `<p class="hint">${t('imagesSelected', { n: state.images.length })}</p>` : ''}`;
+    ${state.linkingMode
+      ? `<div class="link-mode-hint"><span>📎</span><span>${LANG === 'sv' ? 'Tryck på bilderna som tillhör samma kvitto' : 'Tap the images that belong to the same receipt'}</span></div>`
+      : `<label class="file-drop" for="file-input">
+          <span class="file-drop-icon">📷</span>
+          <span class="file-drop-text">${t('fileDropText')}</span>
+          <span class="file-drop-sub">${t('fileDropSub')}</span>
+        </label>
+        <input type="file" id="file-input" accept="image/*" multiple style="display:none">`}
+    ${numImages ? `<div class="image-grid">${thumbs}</div>` : ''}
+    ${numImages && !state.linkingMode ? `<p class="hint">${t('imagesSelected', { n: numImages })}</p>` : ''}
+    ${linkBar}`;
 }
 
 function renderItemRow(item, isWarned) {
@@ -948,7 +1091,7 @@ function renderReceiptGroupHeader(receipt, idx, itemSum, isMismatch) {
   }
 
   const isRerunning = state.rerunningReceiptIdx === idx;
-  const canRerun = !!state.images[idx] && state.rerunningReceiptIdx === null && hasTotal;
+  const canRerun = (state.imageGroups[idx]?.length > 0) && state.rerunningReceiptIdx === null && hasTotal;
   const rerunBtn = isRerunning
     ? `<span class="rgh-spinner" title="${t('rerunSpinnerTitle')}">⟳</span>`
     : `<button class="btn-rerun" data-rerun-idx="${idx}" ${!canRerun ? 'disabled' : ''} title="${t('rerunTitle')}">🔄</button>`;
@@ -1121,6 +1264,7 @@ function renderStep2() {
         <div class="card">
           ${rows || `<p class="text-sec" style="padding:12px 14px">${t('noItemsForReceipt')}</p>`}
         </div>
+        <button class="btn btn-add btn-add-in-receipt" data-add-item-to="${ri}">${t('addItemBtn')}</button>
       </div>`;
     }).join('');
 
@@ -1142,7 +1286,9 @@ function renderStep2() {
     ${itemsHtml}
     ${state.items.length ? `<p class="total-line" id="total-display">${t('totalLine', { amount: fmt(total) })}</p>` : ''}
     ${numReceipts <= 1 ? renderReceiptCheck() : ''}
-    <button class="btn btn-add" id="add-item-btn">${t('addItemBtn')}</button>
+    ${numReceipts <= 1
+      ? `<button class="btn btn-add" data-add-item-to="0">${t('addItemBtn')}</button>`
+      : `<button class="btn btn-add" id="add-item-btn">${t('addItemNewReceipt')}</button>`}
     ${renderDebugPanel()}`;
 }
 
@@ -1294,10 +1440,26 @@ function bindStepEvents() {
   );
   el('analyze-btn')?.addEventListener('click', handleAnalyze);
 
+  // Step 1 — link mode
+  el('link-mode-btn')?.addEventListener('click', () => setState({ linkingMode: true, linkSelection: new Set() }));
+  el('link-cancel-btn')?.addEventListener('click', () => setState({ linkingMode: false, linkSelection: new Set() }));
+  el('link-confirm-btn')?.addEventListener('click', linkImages);
+  document.querySelectorAll('[data-link-select]').forEach(wrap =>
+    wrap.addEventListener('click', () => toggleLinkSelection(wrap.dataset.linkSelect))
+  );
+  document.querySelectorAll('[data-unlink]').forEach(btn =>
+    btn.addEventListener('click', e => { e.stopPropagation(); unlinkImage(btn.dataset.unlink); })
+  );
+
   // Step 2 — delete uses pointerdown to fire before blur
   document.querySelectorAll('[data-remove-item]').forEach(btn =>
     btn.addEventListener('pointerdown', e => { e.preventDefault(); removeItem(btn.dataset.removeItem); })
   );
+  // Per-receipt add item (single-receipt also uses data-add-item-to="0")
+  document.querySelectorAll('[data-add-item-to]').forEach(btn =>
+    btn.addEventListener('pointerdown', e => { e.preventDefault(); addItem(parseInt(btn.dataset.addItemTo, 10)); })
+  );
+  // Multi-receipt: add to new receipt
   el('add-item-btn')?.addEventListener('pointerdown', e => { e.preventDefault(); addItem(); });
 
   // Step 2 — receipt name/total inputs update validation on blur
