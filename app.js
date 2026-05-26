@@ -114,6 +114,7 @@ const STRINGS = {
     linkImagesBtn: '🔗 Group images',
     linkConfirmBtn: ({ n }) => `Group ${n}`,
     unlinkImageBtn: 'Unlink',
+    clearAllPeople: 'Clear all',
   },
   sv: {
     appTitle: '🧾 Kvittodelare',
@@ -222,6 +223,7 @@ const STRINGS = {
     linkImagesBtn: '🔗 Gruppera bilder',
     linkConfirmBtn: ({ n }) => `Gruppera ${n}`,
     unlinkImageBtn: 'Dela upp',
+    clearAllPeople: 'Rensa alla',
   },
 };
 
@@ -259,6 +261,24 @@ if (!state.apiKey && !state.claudeApiKey) state.showApiKeyScreen = true;
 
 let _nextId = 1;
 const uid = () => String(_nextId++);
+
+const SAVED_PEOPLE_KEY = 'saved_people';
+
+function loadSavedPeople() {
+  try {
+    const raw = localStorage.getItem(SAVED_PEOPLE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(p => typeof p?.name === 'string' && p.name.trim())
+      .map(p => ({ id: uid(), name: p.name.trim() }));
+  } catch {
+    return [];
+  }
+}
+
+state.people = loadSavedPeople();
 
 let _cancelRequested = false;
 
@@ -786,14 +806,27 @@ function removeItem(id) {
   setState({ items: state.items.filter(it => it.id !== id), assignments });
 }
 
+function savePeople(people) {
+  localStorage.setItem(SAVED_PEOPLE_KEY, JSON.stringify(people.map(p => ({ name: p.name }))));
+}
+
 function addPerson(name) {
   const n = name.trim();
   if (!n) return;
-  setState({ people: [...state.people, { id: uid(), name: n }] });
+  const people = [...state.people, { id: uid(), name: n }];
+  savePeople(people);
+  setState({ people });
 }
 
 function removePerson(id) {
-  setState({ people: state.people.filter(p => p.id !== id), assignments: {} });
+  const people = state.people.filter(p => p.id !== id);
+  savePeople(people);
+  setState({ people, assignments: {} });
+}
+
+function clearAllPeople() {
+  localStorage.removeItem(SAVED_PEOPLE_KEY);
+  setState({ people: [], assignments: {} });
 }
 
 function initAssignments() {
@@ -877,7 +910,7 @@ function cancelAnalysis() {
 function reset() {
   _cancelRequested = false;
   Object.assign(state, {
-    step: 1, images: [], items: [], receipts: [], people: [], assignments: {}, loading: false,
+    step: 1, images: [], items: [], receipts: [], people: loadSavedPeople(), assignments: {}, loading: false,
     loadingMessage: '', error: null, debugData: null, rerunningReceiptIdx: null, rerunMessage: null,
     imageGroups: [], linkingMode: false, linkSelection: new Set(),
   });
@@ -1302,7 +1335,8 @@ function renderStep3() {
   return `
     <h2 class="section-title">${t('step3Title')}</h2>
     ${state.people.length
-      ? `<div class="people-list">${badges}</div>`
+      ? `<div class="people-list">${badges}</div>
+         <button class="btn-clear-people" id="clear-people-btn">${t('clearAllPeople')}</button>`
       : `<p class="text-sec" style="margin-bottom:16px">${t('noPeopleYet')}</p>`}
     <div class="add-person-row">
       <input class="add-person-input" type="text" id="person-input"
@@ -1484,6 +1518,7 @@ function bindStepEvents() {
   document.querySelectorAll('[data-remove-person]').forEach(btn =>
     btn.addEventListener('click', () => removePerson(btn.dataset.removePerson))
   );
+  el('clear-people-btn')?.addEventListener('click', clearAllPeople);
 
   // Step 4
   document.querySelectorAll('[data-ti]').forEach(btn =>

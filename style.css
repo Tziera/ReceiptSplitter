@@ -406,6 +406,20 @@ body {
   flex-shrink: 0;
 }
 
+.btn-clear-people {
+  background: none;
+  border: none;
+  color: var(--danger);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 0;
+  margin-bottom: 12px;
+  text-decoration: underline;
+  -webkit-tap-highlight-color: transparent;
+  display: block;
+}
+.btn-clear-people:active { opacity: 0.7; }
+
 .add-person-row { display: flex; gap: 8px; }
 
 .add-person-input {
