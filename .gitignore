@@ -1,3 +1,6 @@
+# Claude Code internal state
+.claude/
+
 # API-nycklar
 .env
 
