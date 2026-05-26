@@ -314,7 +314,7 @@ Regler:
   }
 
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -382,7 +382,7 @@ Returnera ENBART giltig JSON utan kodblock:
     },
     body: JSON.stringify({
       model: 'claude-haiku-4-5-20251001',
-      max_tokens: 1024,
+      max_tokens: 4096,
       messages: [{ role: 'user', content }],
     }),
   });
@@ -421,10 +421,20 @@ function handleImageFiles(files) {
     reader.onload = e => {
       newImgs[idx] = { id: uid(), file, dataUrl: e.target.result };
       if (--pending === 0) {
-        const newGroups = newImgs.map(img => [img.id]);
+        const validImgs = newImgs.filter(Boolean);
         setState({
-          images: [...state.images, ...newImgs],
-          imageGroups: [...state.imageGroups, ...newGroups],
+          images: [...state.images, ...validImgs],
+          imageGroups: [...state.imageGroups, ...validImgs.map(img => [img.id])],
+          error: null,
+        });
+      }
+    };
+    reader.onerror = () => {
+      if (--pending === 0) {
+        const validImgs = newImgs.filter(Boolean);
+        setState({
+          images: [...state.images, ...validImgs],
+          imageGroups: [...state.imageGroups, ...validImgs.map(img => [img.id])],
           error: null,
         });
       }
@@ -477,16 +487,16 @@ function linkImages() {
 function unlinkImage(imgId) {
   const assignments = new Map();
   for (const group of state.imageGroups) {
-    for (const id of group) assignments.set(id, group[0]);
+    const newLeader = group[0] === imgId && group.length > 1 ? group[1] : group[0];
+    for (const id of group) assignments.set(id, id === imgId ? imgId : newLeader);
   }
-  assignments.set(imgId, imgId);
   setState({ imageGroups: rebuildImageGroups(assignments) });
 }
 
 async function handleAnalyze() {
   if (!state.images.length) return;
   _cancelRequested = false;
-  setState({ loading: true, error: null, loadingMessage: t('loadingAnalyzing') });
+  setState({ loading: true, error: null, rerunMessage: null, loadingMessage: t('loadingAnalyzing') });
 
   const BATCH1 = 4;
   const BATCH2 = 2;
@@ -536,7 +546,8 @@ async function handleAnalyze() {
 
     for (const it of (raw.items || [])) {
       const pos = typeof it.receipt_idx === 'number' ? it.receipt_idx : 0;
-      const localJ = posToLocalJ[pos] ?? 0;
+      const localJ = posToLocalJ[pos];
+      if (localJ === undefined) continue;
       const gi = groupIdxs[localJ];
       if (gi !== undefined) slots[gi].items.push({ ...it, receipt_idx: gi });
     }
@@ -787,14 +798,14 @@ function addItem(receiptIdx) {
   collectReceipts();
   const newId = uid();
   let targetIdx;
+  let newReceipts = state.receipts;
   if (receiptIdx !== undefined) {
     targetIdx = receiptIdx;
   } else {
-    // Create a new standalone receipt (no associated image)
-    state.receipts.push({ name: t('receiptName', { n: state.receipts.length + 1 }), total: null });
-    targetIdx = state.receipts.length - 1;
+    newReceipts = [...state.receipts, { name: t('receiptName', { n: state.receipts.length + 1 }), total: null }];
+    targetIdx = newReceipts.length - 1;
   }
-  setState({ items: [...state.items, { id: newId, name: '', price: 0, receiptIdx: targetIdx }] });
+  setState({ items: [...state.items, { id: newId, name: '', price: 0, receiptIdx: targetIdx }], receipts: newReceipts });
   setTimeout(() => document.querySelector(`[data-name-id="${newId}"]`)?.focus(), 50);
 }
 
@@ -821,7 +832,12 @@ function addPerson(name) {
 function removePerson(id) {
   const people = state.people.filter(p => p.id !== id);
   savePeople(people);
-  setState({ people, assignments: {} });
+  const assignments = {};
+  for (const [itemId, set] of Object.entries(state.assignments)) {
+    const newSet = new Set([...set].filter(pid => pid !== id));
+    if (newSet.size > 0) assignments[itemId] = newSet;
+  }
+  setState({ people, assignments });
 }
 
 function clearAllPeople() {
@@ -831,9 +847,11 @@ function clearAllPeople() {
 
 function initAssignments() {
   collectItems();
-  const assignments = {};
+  const assignments = { ...state.assignments };
   for (const item of state.items) {
-    assignments[item.id] = new Set(state.people.map(p => p.id));
+    if (!assignments[item.id]) {
+      assignments[item.id] = new Set(state.people.map(p => p.id));
+    }
   }
   setState({ assignments, step: 4, error: null });
 }
@@ -926,7 +944,7 @@ function parsePrice(val) {
   const s = String(val).replace(',', '.');
   const neg = s.trimStart().startsWith('-');
   const abs = parseFloat(s.replace(/[^0-9.]/g, '')) || 0;
-  return neg ? -abs : abs;
+  return neg && abs !== 0 ? -abs : abs;
 }
 
 function fmt(num) {
@@ -1142,7 +1160,7 @@ function renderReceiptGroupHeader(receipt, idx, itemSum, isMismatch) {
 function renderReceiptCheck() {
   if (!state.receipts.length) return '';
   const receipt = state.receipts[0];
-  const itemSum = state.items.reduce((s, it) => s + it.price, 0);
+  const itemSum = state.items.filter(it => (it.receiptIdx ?? 0) === 0).reduce((s, it) => s + it.price, 0);
   const TOLERANCE = 0.50;
 
   if (receipt.total === null) {
@@ -1472,7 +1490,9 @@ function bindStepEvents() {
   document.querySelectorAll('[data-remove-img]').forEach(btn =>
     btn.addEventListener('click', () => removeImage(btn.dataset.removeImg))
   );
-  el('analyze-btn')?.addEventListener('click', handleAnalyze);
+  el('analyze-btn')?.addEventListener('click', () =>
+    handleAnalyze().catch(e => setState({ loading: false, error: e.message }))
+  );
 
   // Step 1 — link mode
   el('link-mode-btn')?.addEventListener('click', () => setState({ linkingMode: true, linkSelection: new Set() }));
@@ -1501,7 +1521,9 @@ function bindStepEvents() {
     input.addEventListener('blur', () => { collectItems(); collectReceipts(); setState({}); })
   );
   document.querySelectorAll('[data-rerun-idx]').forEach(btn =>
-    btn.addEventListener('click', () => reanalyzeReceipt(+btn.dataset.rerunIdx))
+    btn.addEventListener('click', () =>
+      reanalyzeReceipt(+btn.dataset.rerunIdx).catch(e => setState({ rerunningReceiptIdx: null, error: e.message }))
+    )
   );
   el('export-test-btn')?.addEventListener('click', exportTestCase);
 
