@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.4.1';
 
 // ─── i18n ─────────────────────────────────────────────────────────────────────
 
@@ -26,8 +26,8 @@ const STRINGS = {
     loadingAnalyzing: 'Analyzing receipts…',
     loadingAnalyzingBatch: ({ current, total }) => `Analyzing receipts… (${current}/${total})`,
     loadingGeminiRetry: ({ n }) => `Gemini: high demand — retrying in ${n} s…`,
-    loadingRecheckReceipts: ({ n }) => `Rechecking ${n} receipt${n !== 1 ? 's' : ''}…`,
-    loadingClaude: ({ n }) => `Trying Claude Haiku for ${n} receipt${n !== 1 ? 's' : ''}…`,
+    loadingRecheckReceipts: ({ done, n }) => `Rechecking receipts… (${done}/${n})`,
+    loadingClaude: ({ done, n }) => `Trying Claude Haiku… (${done}/${n})`,
     errInvalidApiKey: 'Invalid API key. Check the key in settings.',
     errEmptyGemini: 'Empty response from Gemini.',
     errParseGemini: 'Could not parse the response from Gemini.',
@@ -135,8 +135,8 @@ const STRINGS = {
     loadingAnalyzing: 'Analyserar kvitton…',
     loadingAnalyzingBatch: ({ current, total }) => `Analyserar kvitton… (${current}/${total})`,
     loadingGeminiRetry: ({ n }) => `Gemini: hög belastning — försöker om ${n} s…`,
-    loadingRecheckReceipts: ({ n }) => `Kontrollerar ${n} kvitto${n > 1 ? 'n' : ''} igen…`,
-    loadingClaude: ({ n }) => `Provar Claude Haiku för ${n} kvitto${n > 1 ? 'n' : ''}…`,
+    loadingRecheckReceipts: ({ done, n }) => `Kontrollerar kvitton igen… (${done}/${n})`,
+    loadingClaude: ({ done, n }) => `Provar Claude Haiku… (${done}/${n})`,
     errInvalidApiKey: 'Ogiltig API-nyckel. Kontrollera nyckeln i inställningarna.',
     errEmptyGemini: 'Tomt svar från Gemini.',
     errParseGemini: 'Kunde inte tolka svaret från Gemini.',
@@ -313,7 +313,7 @@ Regler:
     });
   }
 
-  const res = await fetch(
+  const res = await fetchWithTimeout(
     `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
     {
       method: 'POST',
@@ -372,7 +372,7 @@ Returnera ENBART giltig JSON utan kodblock:
 - Om pris är oklart, uppskatta`,
   });
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+  const res = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -576,7 +576,7 @@ async function handleAnalyze() {
     const DELAYS = [5, 10, 20];
     for (let attempt = 0; attempt <= DELAYS.length; attempt++) {
       try {
-        if (label && attempt === 0) setState({ loadingMessage: label });
+        if (label) setState({ loadingMessage: label });
         await runBatch(groupIdxs, callGemini, state.apiKey, 'Gemini');
         return 'ok';
       } catch (e) {
@@ -618,15 +618,17 @@ async function handleAnalyze() {
       .filter(gi => !toClaudeSet.has(gi) && isMismatch(gi));
 
     if (mismatched.length) {
-      setState({ loadingMessage: t('loadingRecheckReceipts', { n: mismatched.length }) });
+      let recheckDone = 0;
+      const recheckTotal = mismatched.length;
       for (const batch of chunkGroups(mismatched, BATCH2)) {
         if (_cancelRequested) return;
         try {
-          const result = await runGeminiBatch(batch, null);
+          const result = await runGeminiBatch(batch, t('loadingRecheckReceipts', { done: recheckDone, n: recheckTotal }));
           if (result === 'cancelled') return;
           if (result === 'quota') batch.forEach(gi => toClaudeSet.add(gi));
           else batch.filter(isMismatch).forEach(gi => toClaudeSet.add(gi));
         } catch { batch.forEach(gi => toClaudeSet.add(gi)); }
+        recheckDone += batch.length;
       }
     }
   } else {
@@ -643,12 +645,15 @@ async function handleAnalyze() {
       }
     } else {
       const claudeIdxs = [...toClaudeSet];
-      setState({ loadingMessage: t('loadingClaude', { n: claudeIdxs.length }) });
+      const claudeTotal = claudeIdxs.length;
+      let claudeDone = 0;
       for (const batch of chunkGroups(claudeIdxs, BATCH2)) {
         if (_cancelRequested) return;
+        setState({ loadingMessage: t('loadingClaude', { done: claudeDone, n: claudeTotal }) });
         try {
           await runBatch(batch, callClaude, state.claudeApiKey, 'Claude');
         } catch { /* slots remain empty — UI shows mismatch warning */ }
+        claudeDone += batch.length;
       }
     }
   }
@@ -938,6 +943,13 @@ function reset() {
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function fetchWithTimeout(url, options, ms = 60000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), ms);
+  return fetch(url, { ...options, signal: controller.signal })
+    .finally(() => clearTimeout(id));
+}
 
 function parsePrice(val) {
   if (typeof val === 'number') return isNaN(val) ? 0 : val;
@@ -1365,11 +1377,12 @@ function renderStep3() {
 }
 
 function renderStep4() {
-  const cards = state.items.map(item => {
+  const numReceipts = state.receipts.length;
+
+  function renderDistItem(item) {
     const assigned = state.assignments[item.id] || new Set();
     const count = assigned.size;
     const share = count > 0 ? fmt(item.price / count) : '–';
-
     const toggles = state.people.map(p => {
       const isActive = assigned.has(p.id);
       const isOnly = isActive && count === 1;
@@ -1377,7 +1390,6 @@ function renderStep4() {
         data-ti="${item.id}" data-tp="${p.id}"
         ${isOnly ? `title="${t('cannotRemoveLast')}"` : ''}>${esc(p.name)}</button>`;
     }).join('');
-
     return `
       <div class="dist-item">
         <div class="dist-item-header">
@@ -1386,7 +1398,29 @@ function renderStep4() {
         </div>
         <div class="dist-people">${toggles}</div>
       </div>`;
-  }).join('');
+  }
+
+  let cards;
+  if (numReceipts <= 1) {
+    cards = state.items.map(renderDistItem).join('');
+  } else {
+    cards = state.receipts.map((r, ri) => {
+      const receiptItems = state.items.filter(it => (it.receiptIdx ?? 0) === ri);
+      if (!receiptItems.length) return '';
+      return `<div class="receipt-group">
+        <div class="receipt-group-header rgh--ok"><span class="rgh-icon">✓</span><span>${esc(r.name)}</span></div>
+        ${receiptItems.map(renderDistItem).join('')}
+      </div>`;
+    }).join('');
+
+    const orphans = state.items.filter(it => (it.receiptIdx ?? 0) >= numReceipts);
+    if (orphans.length) {
+      cards += `<div class="receipt-group">
+        <div class="receipt-group-header rgh--unknown"><span class="rgh-icon">❓</span><span>${t('unknownReceipt')}</span></div>
+        ${orphans.map(renderDistItem).join('')}
+      </div>`;
+    }
+  }
 
   return `
     <h2 class="section-title">${t('step4Title')}</h2>
