@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.4.1';
+const APP_VERSION = '1.4.2';
 
 // ─── i18n ─────────────────────────────────────────────────────────────────────
 
@@ -108,6 +108,7 @@ const STRINGS = {
     rerunUpdated: ({ n, model, oldDiff, newDiff }) => `Receipt ${n} updated (${model}) — diff decreased from ${oldDiff} to ${newDiff} kr.`,
     ariaRemoveImage: 'Remove image',
     ariaRemoveItem: 'Remove',
+    ariaToggleSign: 'Make negative (discount)',
     ariaRemovePerson: ({ name }) => `Remove ${name}`,
     ariaAddPerson: 'Add person',
     addItemNewReceipt: '+ Add to new receipt',
@@ -217,6 +218,7 @@ const STRINGS = {
     rerunUpdated: ({ n, model, oldDiff, newDiff }) => `Kvitto ${n} uppdaterat (${model}) — diff minskade från ${oldDiff} till ${newDiff} kr.`,
     ariaRemoveImage: 'Ta bort bild',
     ariaRemoveItem: 'Ta bort',
+    ariaToggleSign: 'Gör negativ (rabatt)',
     ariaRemovePerson: ({ name }) => `Ta bort ${name}`,
     ariaAddPerson: 'Lägg till person',
     addItemNewReceipt: '+ Lägg till i nytt kvitto',
@@ -1130,6 +1132,7 @@ function renderItemRow(item, isWarned) {
         data-name-id="${item.id}" placeholder="${t('itemNamePlaceholder')}" inputmode="text">
       <input class="item-price-input" type="number" value="${item.price || ''}"
         data-price-id="${item.id}" placeholder="0" step="0.01" inputmode="decimal">
+      <button class="item-sign-btn" data-toggle-sign="${item.id}" aria-label="${t('ariaToggleSign')}" title="${t('ariaToggleSign')}">±</button>
       ${confBadge}
       <button class="btn btn-danger" data-remove-item="${item.id}" aria-label="${t('ariaRemoveItem')}">🗑</button>
     </div>`;
@@ -1542,6 +1545,14 @@ function bindStepEvents() {
   // Step 2 — delete uses pointerdown to fire before blur
   document.querySelectorAll('[data-remove-item]').forEach(btn =>
     btn.addEventListener('pointerdown', e => { e.preventDefault(); removeItem(btn.dataset.removeItem); })
+  );
+  document.querySelectorAll('[data-toggle-sign]').forEach(btn =>
+    btn.addEventListener('pointerdown', e => {
+      e.preventDefault();
+      collectItems();
+      const item = state.items.find(it => it.id === btn.dataset.toggleSign);
+      if (item) { item.price = -item.price; setState({}); }
+    })
   );
   // Per-receipt add item (single-receipt also uses data-add-item-to="0")
   document.querySelectorAll('[data-add-item-to]').forEach(btn =>

@@ -322,6 +322,20 @@ body {
   border-color: transparent;
 }
 
+.item-sign-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-sec);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.item-sign-btn:active { background: var(--border); }
+
 .total-line {
   text-align: right;
   font-size: 14px;
